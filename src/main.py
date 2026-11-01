@@ -1,6 +1,6 @@
 from model.model import World
+from model.scenario import Scenario
 from mesa.visualization import SolaraViz, make_space_component
-from matplotlib.colors import ListedColormap
 from mesa.visualization.components import PropertyLayerStyle
 from mesa import Agent
 
@@ -8,14 +8,25 @@ class DummyAgent(Agent):
     def __init__(self, model):
         super().__init__(model)
 
-from matplotlib.colors import ListedColormap
+water_color = "#1f77b4"
+fuel_color = "#BFBFBF"
+deposit_color = "#8F786D"
 
-colors = [
-    "#1f77b4",
-    "#8fbc8f",
-    "#BFBFBF",
-    "#8F786D",
-]
+
+def blend_colors(start, end, amount):
+    start_rgb = tuple(int(start[index:index + 2], 16) for index in (1, 3, 5))
+    end_rgb = tuple(int(end[index:index + 2], 16) for index in (1, 3, 5))
+    blended = [
+        round(start_value + (end_value - start_value) * amount)
+        for start_value, end_value in zip(start_rgb, end_rgb)
+    ]
+    return "#{:02x}{:02x}{:02x}".format(*blended)
+
+
+colors = [water_color, "#8fbc8f", fuel_color, deposit_color]
+for station_color in (fuel_color, deposit_color):
+    for band in range(1, 11):
+        colors.append(blend_colors(water_color, station_color, band / 10))
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":
@@ -23,7 +34,7 @@ def propertylayer_portrayal(layer):
             colormap=colors,
             alpha=0.8,
             vmin=0,
-            vmax=3,
+            vmax=23,
             colorbar=False
         )
     return None
@@ -33,51 +44,20 @@ space_component = make_space_component(
     draw_grid=False,
 )
 
-# 1. Instancier le modèle explicitement
 model = World(
-    ship_spawn_rate=0.1,
-    fish_amount=50,
-    fish_standard_deviation=5.0,
-    seed=42,
+    Scenario(
+        ship_spawn_rate=0.1,
+        fish_amount=50,
+        fish_standard_deviation=5.0,
+        seed=42,
+    )
 )
 
 dummy = DummyAgent(model)
 model.grid.place_agent(dummy, (0, 0))
 
-# 2. Passer l'INSTANCE (model), et non la classe (World)
 page = SolaraViz(
     model,
     components=[space_component],
-    model_params={
-        "ship_spawn_rate": {
-            "type": "SliderFloat",
-            "value": 0.1,
-            "label": "Taux d'apparition des navires",
-            "min": 0.0,
-            "max": 1.0,
-            "step": 0.01,
-        },
-        "fish_amount": {
-            "type": "SliderInt",
-            "value": 50,
-            "label": "Nombre de poissons",
-            "min": 0,
-            "max": 500,
-            "step": 1,
-        },
-        "fish_standard_deviation": {
-            "type": "SliderFloat",
-            "value": 5.0,
-            "label": "Écart-type de dispersion des poissons",
-            "min": 0.1,
-            "max": 25.0,
-            "step": 0.1,
-        },
-        "seed": {
-            "type": "InputText",
-            "value": 42,
-            "label": "Graine aléatoire",
-        },
-    },
     name="Port Simulation",
 )
