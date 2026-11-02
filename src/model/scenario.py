@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 
-DEFAULT_TILES = (
+PORTO_TILES = (
     (0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1),
     (0,0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1),
     (0,0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,0,0),
@@ -29,10 +29,12 @@ DEFAULT_TILES = (
 class Scenario:
     width: int = 20
     height: int = 20
-    tiles: tuple[tuple[int, ...], ...] = DEFAULT_TILES
+    tiles: tuple[tuple[int, ...], ...] = PORTO_TILES
     scale: int = 1
     torus: bool = False
     ship_spawn_rate: float = 0.1
     fish_amount: int = 50
     fish_standard_deviation: float = 5.0
+    fish_price: float = 1.0
+    fuel_price: float = 1.0
     seed: int | None = None
