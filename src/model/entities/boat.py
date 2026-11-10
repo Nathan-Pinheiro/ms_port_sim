@@ -210,11 +210,11 @@ class Boat(Agent):
         ][self.pos[1]]
 
         if target_key == "deposit":
-            # 18 = eau adjacente a une station de depot
+            # 8 = eau adjacente a une station de depot
             if current_terrain == self.model.DEPOSIT_ADJACENT and self.fish > 0:
                 return
         elif target_key == "fuel":
-            # 8 = eau adjacente a une station carburant
+            # 18 = eau adjacente a une station carburant
             if (
                 current_terrain == self.model.FUEL_ADJACENT
                 and self.fuel < self.fuel_capacity

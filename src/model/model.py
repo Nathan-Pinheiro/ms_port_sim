@@ -20,11 +20,11 @@ class World(Model):
 
     * ``0``  – eau navigable
     * ``1``  – terre
-    * ``2``  – station carburant
-    * ``3``  – station de dépôt
+    * ``2``  – station de dépôt
+    * ``3``  – station carburant
     * ``4``  – case d'entrée / sortie (franchissable, comme l'eau)
-    * ``8``  – eau adjacente à une station carburant
-    * ``18`` – eau adjacente à une station de dépôt
+    * ``8``  – eau adjacente à une station de dépôt
+    * ``18`` – eau adjacente à une station carburant
     """
 
     fuel_threshold = 25.0
@@ -32,11 +32,11 @@ class World(Model):
 
     WATER = 0
     TERRAIN = 1
-    FUEL_STATION = 2
-    DEPOSIT_STATION = 3
+    FUEL_STATION = 3
+    DEPOSIT_STATION = 2
     ENTRY_EXIT = 4
-    FUEL_ADJACENT = 8
-    DEPOSIT_ADJACENT = 18
+    FUEL_ADJACENT = 18
+    DEPOSIT_ADJACENT = 8
 
     # Cellules sur lesquelles un bateau peut naviguer (empreinte complète).
     NAVIGABLE = frozenset({WATER, ENTRY_EXIT, FUEL_ADJACENT, DEPOSIT_ADJACENT})
@@ -156,6 +156,7 @@ class World(Model):
                     and expanded_tiles[ny][nx] in (2, 3)
                 ]
                 if neighbors:
+                    # 2 = depot -> acces 8 ; 3 = carburant -> acces 18
                     row[x] = 8 if neighbors[0] == 2 else 18
 
         return expanded_tiles

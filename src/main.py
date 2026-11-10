@@ -11,9 +11,9 @@ from model.scenario import Scenario
 from model.visualization.boat_portrayal import draw_boats
 
 water_color = "#1f77b4"
-fuel_color = "#BFBFBF"
-deposit_color = "#8F786D"
-entry_exit_color = "#26A69A"
+deposit_color = "#BFBFBF"
+fuel_color = "#8F786D"
+entry_exit_color = "#1f77b4"
 
 
 def blend_colors(start: str, end: str, amount: float) -> str:
@@ -26,9 +26,9 @@ def blend_colors(start: str, end: str, amount: float) -> str:
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
 
-# Ordre des valeurs de terrain : 0=eau, 1=terre, 2=carburant, 3=depot, 4=entree.
-colors = [water_color, "#8fbc8f", fuel_color, deposit_color, entry_exit_color]
-for station_color in (fuel_color, deposit_color):
+# Ordre des valeurs de terrain : 0=eau, 1=terre, 2=depot, 3=carburant, 4=entree.
+colors = [water_color, "#8fbc8f", deposit_color, fuel_color, entry_exit_color]
+for station_color in (deposit_color, fuel_color):
     for band in range(1, 11):
         colors.append(blend_colors(water_color, station_color, band / 10))
 
