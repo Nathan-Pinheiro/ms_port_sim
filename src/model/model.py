@@ -2,6 +2,7 @@ from mesa import Agent, Model
 from mesa.space import PropertyLayer, SingleGrid
 
 from model.entities.boat import (
+    BOAT_FOOTPRINTS,
     Boat,
     DIRECTION_EAST,
     DIRECTION_NORTH,
@@ -66,6 +67,7 @@ class World(Model):
         self.total_fuel_paid = 0.0
         self.total_boats_serviced = 0
         self.boats_teleported_to_deposit = 0
+        self.boats_spawned = 0
 
         # Champs de vecteurs (flow fields) utilises par le pathfinding
         self.flow_fields: dict = {}
@@ -199,18 +201,85 @@ class World(Model):
             self.flow_fields["deposit"] = {}
 
     # ------------------------------------------------------------------ #
+    # Apparition des bateaux
+    # ------------------------------------------------------------------ #
+
+    def _find_spawn_placement(self, boat: Boat) -> tuple[int, int] | None:
+        """Trouve une case d'entree libre ou l'empreinte du bateau peut tenir."""
+        placements: list[tuple[tuple[int, int], int]] = []
+        for position in self.entry_exit_cells:
+            for direction in (
+                DIRECTION_NORTH,
+                DIRECTION_EAST,
+                DIRECTION_SOUTH,
+                DIRECTION_WEST,
+            ):
+                previous_direction = boat.direction
+                boat.direction = direction
+                fits = self.can_place_boat(boat, position) and all(
+                    self.grid.is_cell_empty(cell)
+                    for cell in boat.occupied_cells(position)
+                )
+                boat.direction = previous_direction
+                if fits:
+                    placements.append((position, direction))
+
+        if not placements:
+            return None
+
+        position, direction = self.random.choice(placements)
+        boat.direction = direction
+        return position
+
+    def spawn_boats(self) -> list[Boat]:
+        """Fait apparaitre un bateau aleatoire sur une entree libre.
+
+        ``ship_spawn_rate`` est la probabilite de spawn par pas de simulation.
+        Le poisson embarque suit une loi normale
+        ``(fish_amount, fish_standard_deviation)``, bornee a zero.
+        """
+        if self.ship_spawn_rate <= 0:
+            return []
+        if self.random.random() >= self.ship_spawn_rate:
+            return []
+
+        size = self.random.choice(tuple(BOAT_FOOTPRINTS))
+        fish = max(
+            0,
+            round(
+                self.random.gauss(
+                    self.fish_amount,
+                    self.fish_standard_deviation,
+                )
+            ),
+        )
+        boat = Boat(
+            size=size,
+            name=f"Boat {self.boats_spawned + 1}",
+            speed=1,
+            capacity=max(fish, self.fish_amount, 1),
+            fuel_consuption=1,
+            fish=fish,
+        )
+
+        position = self._find_spawn_placement(boat)
+        if position is None:
+            return []
+
+        self.add_boat(boat, position)
+        self.boats_spawned += 1
+        return [boat]
+
+    # ------------------------------------------------------------------ #
     # Boucle de simulation
     # ------------------------------------------------------------------ #
 
     def step(self):
-        """Téléporte les bateaux fraîchement spawnés vers le dépôt, puis traite les services."""
+        """Fait apparaitre de nouveaux bateaux puis traite deplacements et services."""
+        self.spawn_boats()
+
         for boat in list(self.boats):
             if boat.position is None:
-                continue
-
-            if boat.position == self.boat_spawn_position:
-                self.grid.move_agent(boat, self.deposit_access_position)
-                self.boats_teleported_to_deposit += 1
                 continue
 
             boat.step()
@@ -318,7 +387,9 @@ class World(Model):
             boat.direction = int(direction) % 4
 
         target = (position[0] + dx, position[1] + dy)
-        if not self.can_place_boat(boat, target):
+        if not self.can_place_boat(boat, target) or not self.grid.is_cell_empty(
+            target
+        ):
             boat.direction = previous_direction
             return False
 

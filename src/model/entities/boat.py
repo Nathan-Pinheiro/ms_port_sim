@@ -187,7 +187,9 @@ class Boat(Agent):
             # Un grand bateau doit pouvoir tourner pour emprunter la case :
             # on valide l'empreinte dans la direction du deplacement.
             self.direction = self._direction_from_delta(dir_x, dir_y)
-            can_move = self.model.can_place_boat(self, (nx, ny))
+            can_move = self.model.can_place_boat(
+                self, (nx, ny)
+            ) and self.model.grid.is_cell_empty((nx, ny))
             if not can_move:
                 continue
 
