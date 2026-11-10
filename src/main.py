@@ -1,12 +1,18 @@
 from model.model import World
 from model.scenario import Scenario
-from model.entities.boat import Boat
 import solara
-from mesa.visualization import SolaraViz, make_space_component
+from matplotlib.figure import Figure
+from mesa.visualization import SolaraViz
 from mesa.visualization.components import PropertyLayerStyle
+from mesa.visualization.mpl_space_drawing import draw_property_layers
+from mesa.visualization.utils import update_counter
+
+from model.visualization.boat_portrayal import draw_boats
+
 water_color = "#1f77b4"
 fuel_color = "#BFBFBF"
 deposit_color = "#8F786D"
+entry_exit_color = "#26A69A"
 
 def blend_colors(start, end, amount):
     start_rgb = tuple(int(start[index:index + 2], 16) for index in (1, 3, 5))
@@ -18,10 +24,11 @@ def blend_colors(start, end, amount):
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
 
-colors = [water_color, "#8fbc8f", fuel_color, deposit_color]
+colors = [water_color, "#8fbc8f", fuel_color, deposit_color, entry_exit_color]
 for station_color in (fuel_color, deposit_color):
     for band in range(1, 11):
         colors.append(blend_colors(water_color, station_color, band / 10))
+
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":
@@ -29,34 +36,36 @@ def propertylayer_portrayal(layer):
             colormap=colors,
             alpha=0.8,
             vmin=0,
-            vmax=23,
+            vmax=24,
             colorbar=False
         )
     return None
 
-def agent_portrayal(agent):
-    if isinstance(agent, Boat):
-        fish_ratio = (
-            agent.fish / agent.capacity
-            if agent.capacity > 0
-            else 0
-        )
-        return {
-            "color": blend_colors("#ffffff", "#ff0000", fish_ratio),
-            "marker": "o",
-            "size": 50 + fish_ratio * 950,
-        }
-    return {
-        "color": "#000000",
-        "marker": "o",
-        "size": 50,
-    }
 
-space_component = make_space_component(
-    agent_portrayal=agent_portrayal,
-    propertylayer_portrayal=propertylayer_portrayal,
-    draw_grid=False,
-)
+@solara.component
+def space_component(model):
+    """Terrain (property layer) + bateaux vectoriels.
+
+    Les bateaux ne passent volontairement pas par ``make_space_component`` :
+    Mesa dessinerait des marqueurs images sans teinte dynamique ni taille en
+    cellules. ``draw_boats`` les dessine ici en vectoriel, par-dessus le
+    terrain.
+    """
+    update_counter.get()
+
+    space = model.grid
+    fig = Figure()
+    ax = fig.add_subplot()
+
+    draw_property_layers(space, propertylayer_portrayal, ax=ax)
+    ax.set_xlim(-0.5, space.width - 0.5)
+    ax.set_ylim(-0.5, space.height - 0.5)
+    ax.set_aspect("equal")
+
+    draw_boats(ax, model)
+
+    solara.FigureMatplotlib(fig, format="png", bbox_inches="tight")
+
 
 def score_component(model):
     solara.Markdown(
