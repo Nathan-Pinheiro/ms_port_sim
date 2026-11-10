@@ -204,8 +204,8 @@ class Boat(Agent):
             return
 
         current_terrain = self.model.grid.properties["terrain"].data[
-            self.pos[1]
-        ][self.pos[0]]
+            self.pos[0]
+        ][self.pos[1]]
 
         if target_key == "deposit":
             # 18 = eau adjacente a une station de depot

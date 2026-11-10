@@ -97,7 +97,7 @@ class World(Model):
             (x, y)
             for x in range(width)
             for y in range(height)
-            if terrain_layer.data[y][x] == self.ENTRY_EXIT
+            if terrain_layer.data[x][y] == self.ENTRY_EXIT
         ]
         if not self.entry_exit_cells:
             raise ValueError(
@@ -162,7 +162,7 @@ class World(Model):
         """Indique si la case ``(x, y)`` est navigable (independamment d'un bateau)."""
         if self.grid.out_of_bounds((x, y)):
             return False
-        terrain = self.grid.properties["terrain"].data[y][x]
+        terrain = self.grid.properties["terrain"].data[x][y]
         return terrain in self.NAVIGABLE
 
     def get_available_deposit_positions(self) -> list[tuple[int, int]]:
@@ -172,7 +172,7 @@ class World(Model):
         height = self.grid.height
         for y in range(height):
             for x in range(width):
-                terrain = self.grid.properties["terrain"].data[y][x]
+                terrain = self.grid.properties["terrain"].data[x][y]
                 if terrain == self.DEPOSIT_ADJACENT:
                     if self.grid.is_cell_empty((x, y)):
                         available.append((x, y))
@@ -180,7 +180,7 @@ class World(Model):
         if not available:
             for y in range(height):
                 for x in range(width):
-                    terrain = self.grid.properties["terrain"].data[y][x]
+                    terrain = self.grid.properties["terrain"].data[x][y]
                     if terrain == self.DEPOSIT_ADJACENT:
                         available.append((x, y))
 
@@ -274,7 +274,7 @@ class World(Model):
         for cell_x, cell_y in boat.occupied_cells(position):
             if not (0 <= cell_x < self.grid.width and 0 <= cell_y < self.grid.height):
                 return False
-            if terrain_layer[cell_y][cell_x] in self.NAVIGABLE:
+            if terrain_layer[cell_x][cell_y] in self.NAVIGABLE:
                 continue
             if allow_access and (cell_x, cell_y) == self.deposit_access_position:
                 continue
@@ -379,7 +379,7 @@ class World(Model):
         for nx, ny in positions:
             if self.grid.out_of_bounds((nx, ny)):
                 continue
-            terrain = terrain_data[ny][nx]
+            terrain = terrain_data[nx][ny]
             if terrain in (self.FUEL_STATION, self.FUEL_ADJACENT):
                 zones.add("fuel")
             elif terrain in (self.DEPOSIT_STATION, self.DEPOSIT_ADJACENT):
