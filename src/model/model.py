@@ -1,7 +1,8 @@
 from mesa import Model
-from mesa.space import SingleGrid, PropertyLayer
-from model.scenario import Scenario
+from mesa.space import PropertyLayer, SingleGrid
 from model.entities.boat import Boat
+from model.pathfinding import generate_flow_field
+from model.scenario import Scenario
 
 
 class World(Model):
@@ -31,6 +32,8 @@ class World(Model):
         self.total_boats_serviced = 0
         self.boats_teleported_to_deposit = 0
 
+        self.flow_fields: dict = {}
+
         tiles = self._build_scaled_tiles(scenario.tiles, scenario.scale)
         height = len(tiles)
         width = len(tiles[0])
@@ -53,6 +56,8 @@ class World(Model):
             "tiles": tiles,
         }
 
+        self.update_deposit_flow_field()
+
         if demo_boat_fish is not None:
             demo_boat = Boat(
                 size=3,
@@ -72,7 +77,6 @@ class World(Model):
             raise ValueError("The map tiles must be a non-empty rectangular grid")
 
         expanded_tiles = []
-
         for source_row in source_tiles:
             expanded_row = []
             for value in source_row:
@@ -104,9 +108,46 @@ class World(Model):
 
         return expanded_tiles
 
+    def is_cell_walkable(self, x: int, y: int) -> bool:
+        if self.grid.out_of_bounds((x, y)):
+            return False
+        terrain = self.grid.properties["terrain"].data[x][y]
+        return terrain in (0, 8, 18)
+
+    def get_available_deposit_positions(self) -> list[tuple[int, int]]:
+        available = []
+        width = self.grid.width
+        height = self.grid.height
+        for y in range(height):
+            for x in range(width):
+                terrain = self.grid.properties["terrain"].data[x][y]
+                # Le pathfinding cible UNIQUEMENT l'accès 8 (Déchargement / Blanc)
+                if terrain == 8:
+                    if self.grid.is_cell_empty((x, y)):
+                        available.append((x, y))
+
+        if not available:
+            for y in range(height):
+                for x in range(width):
+                    terrain = self.grid.properties["terrain"].data[x][y]
+                    if terrain == 8:
+                        available.append((x, y))
+
+        return available
+
+    def update_deposit_flow_field(self) -> None:
+        targets = self.get_available_deposit_positions()
+        if targets:
+            self.flow_fields["deposit"] = generate_flow_field(
+                self.grid,
+                targets=targets,
+                is_walkable_func=self.is_cell_walkable,
+            )
+        else:
+            self.flow_fields["deposit"] = {}
+
     def step(self):
-        """Teleport spawned boats to the demo deposit, then process interactions."""
-        for boat in self.boats:
+        for boat in list(self.boats):
             if boat.position is None:
                 continue
 
@@ -115,12 +156,15 @@ class World(Model):
                 self.boats_teleported_to_deposit += 1
                 continue
 
+            boat.step()
+
             serviced = self.service_boat(boat)
+            if serviced:
+                self.update_deposit_flow_field()
 
         self.steps += 1
 
     def service_boat(self, boat: Boat) -> bool:
-        """Deposit fish and refuel a boat at its current position."""
         if boat.position is None:
             return False
 
@@ -148,11 +192,10 @@ class World(Model):
         return serviced
 
     def add_boat(self, boat: Boat, position: tuple[int, int]) -> Boat:
-        """Add a stationary boat to a water cell."""
         if not isinstance(boat, Boat):
             raise TypeError("boat must be a Boat")
         if not self.grid.out_of_bounds(position):
-            terrain = self.grid.properties["terrain"].data[position[1]][position[0]]
+            terrain = self.grid.properties["terrain"].data[position[0]][position[1]]
             if terrain != 0 and position != self.deposit_access_position:
                 raise ValueError("boats must be placed on a water cell")
         else:
@@ -167,11 +210,9 @@ class World(Model):
         return boat
 
     def nearby_zones(self, position: tuple[int, int]) -> set[str]:
-        """Return service zones directly adjacent to a grid position."""
         return self._zones_at(position, include_position=False)
 
     def zones_at_position(self, position: tuple[int, int]) -> set[str]:
-        """Return zones occupied by or directly adjacent to a position."""
         return self._zones_at(position, include_position=True)
 
     def _zones_at(
@@ -191,9 +232,10 @@ class World(Model):
         for neighbor_x, neighbor_y in positions:
             if self.grid.out_of_bounds((neighbor_x, neighbor_y)):
                 continue
-            terrain = self.grid.properties["terrain"].data[neighbor_y][neighbor_x]
+            terrain = self.grid.properties["terrain"].data[neighbor_x][neighbor_y]
+            # INVERSION LOGIQUE : 2 et 8 = Déchargement, 3 et 18 = Carburant
             if terrain in (2, 8):
-                zones.add("fuel")
-            elif terrain in (3, 18):
                 zones.add("deposit")
+            elif terrain in (3, 18):
+                zones.add("fuel")
         return zones
