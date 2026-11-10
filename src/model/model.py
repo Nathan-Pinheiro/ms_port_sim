@@ -1,9 +1,6 @@
-from mesa import Model, Agent
-from mesa.space import SingleGrid, PropertyLayer
+from mesa import Agent, Model
 from mesa.space import PropertyLayer, SingleGrid
-from model.entities.boat import Boat
-from model.pathfinding import generate_flow_field
-from model.scenario import Scenario
+
 from model.entities.boat import (
     Boat,
     DIRECTION_EAST,
@@ -11,6 +8,8 @@ from model.entities.boat import (
     DIRECTION_SOUTH,
     DIRECTION_WEST,
 )
+from model.pathfinding import generate_flow_field
+from model.scenario import Scenario
 
 
 class World(Model):
@@ -68,6 +67,9 @@ class World(Model):
         self.total_boats_serviced = 0
         self.boats_teleported_to_deposit = 0
 
+        # Champs de vecteurs (flow fields) utilises par le pathfinding
+        self.flow_fields: dict = {}
+
         # Construction de la grille
         tiles = self._build_scaled_tiles(scenario.tiles, scenario.scale)
         height = len(tiles)
@@ -103,6 +105,9 @@ class World(Model):
                 f"(valeur {self.ENTRY_EXIT}). Vérifie PORTO_TILES."
             )
         self.boat_spawn_position = self.entry_exit_cells[0]
+
+        # Le champ de depot doit exister avant le premier pas de simulation.
+        self.update_deposit_flow_field()
 
         if demo_boat_fish is not None:
             demo_boat = Boat(
@@ -154,33 +159,35 @@ class World(Model):
         return expanded_tiles
 
     def is_cell_walkable(self, x: int, y: int) -> bool:
+        """Indique si la case ``(x, y)`` est navigable (independamment d'un bateau)."""
         if self.grid.out_of_bounds((x, y)):
             return False
-        terrain = self.grid.properties["terrain"].data[x][y]
-        return terrain in (0, 8, 18)
+        terrain = self.grid.properties["terrain"].data[y][x]
+        return terrain in self.NAVIGABLE
 
     def get_available_deposit_positions(self) -> list[tuple[int, int]]:
+        """Cases d'eau adjacentes au depot, libres en priorite."""
         available = []
         width = self.grid.width
         height = self.grid.height
         for y in range(height):
             for x in range(width):
-                terrain = self.grid.properties["terrain"].data[x][y]
-                # Le pathfinding cible UNIQUEMENT l'accès 8 (Déchargement / Blanc)
-                if terrain == 8:
+                terrain = self.grid.properties["terrain"].data[y][x]
+                if terrain == self.DEPOSIT_ADJACENT:
                     if self.grid.is_cell_empty((x, y)):
                         available.append((x, y))
 
         if not available:
             for y in range(height):
                 for x in range(width):
-                    terrain = self.grid.properties["terrain"].data[x][y]
-                    if terrain == 8:
+                    terrain = self.grid.properties["terrain"].data[y][x]
+                    if terrain == self.DEPOSIT_ADJACENT:
                         available.append((x, y))
 
         return available
 
     def update_deposit_flow_field(self) -> None:
+        """Recalcule le flow field vers les acces de depot disponibles."""
         targets = self.get_available_deposit_positions()
         if targets:
             self.flow_fields["deposit"] = generate_flow_field(
@@ -197,7 +204,7 @@ class World(Model):
 
     def step(self):
         """Téléporte les bateaux fraîchement spawnés vers le dépôt, puis traite les services."""
-        for boat in self.boats:
+        for boat in list(self.boats):
             if boat.position is None:
                 continue
 
@@ -211,7 +218,6 @@ class World(Model):
             serviced = self.service_boat(boat)
             if serviced:
                 self.update_deposit_flow_field()
-            self.service_boat(boat)
 
         self.steps += 1
 

@@ -156,6 +156,13 @@ class Boat(Agent):
 
         return (avoid_x, avoid_y)
 
+    @staticmethod
+    def _direction_from_delta(dx: int, dy: int) -> int:
+        """Direction cardinale dominante d'un deplacement ``(dx, dy)``."""
+        if abs(dx) >= abs(dy):
+            return DIRECTION_EAST if dx > 0 else DIRECTION_WEST
+        return DIRECTION_NORTH if dy > 0 else DIRECTION_SOUTH
+
     def _select_best_neighbor_cell(
         self, target_dx: float, target_dy: float
     ) -> tuple[int, int] | None:
@@ -164,19 +171,24 @@ class Boat(Agent):
 
         best_pos = self.pos
         best_score = -float("inf")
+        previous_direction = self.direction
 
         possible_steps = self.model.grid.get_neighborhood(
             self.pos, moore=True, include_center=False
         )
 
         for nx, ny in possible_steps:
-            if hasattr(self.model, "is_cell_walkable") and not self.model.is_cell_walkable(nx, ny):
-                continue
-
             dir_x = nx - self.pos[0]
             dir_y = ny - self.pos[1]
             length = math.hypot(dir_x, dir_y)
             if length == 0:
+                continue
+
+            # Un grand bateau doit pouvoir tourner pour emprunter la case :
+            # on valide l'empreinte dans la direction du deplacement.
+            self.direction = self._direction_from_delta(dir_x, dir_y)
+            can_move = self.model.can_place_boat(self, (nx, ny))
+            if not can_move:
                 continue
 
             dot_product = ((dir_x / length) * target_dx) + ((dir_y / length) * target_dy)
@@ -184,22 +196,27 @@ class Boat(Agent):
                 best_score = dot_product
                 best_pos = (nx, ny)
 
+        self.direction = previous_direction
         return best_pos
 
     def move(self, target_key: str = "deposit") -> None:
         if self.pos is None or self.fuel <= 0:
             return
 
-        current_terrain = self.model.grid.properties["terrain"].data[self.pos[0]][self.pos[1]]
-        
+        current_terrain = self.model.grid.properties["terrain"].data[
+            self.pos[1]
+        ][self.pos[0]]
+
         if target_key == "deposit":
-            # 8 = Case d'eau d'accès au déchargement (Stations Blanches / Haut)
-            if current_terrain == 8 and self.fish > 0:
+            # 18 = eau adjacente a une station de depot
+            if current_terrain == self.model.DEPOSIT_ADJACENT and self.fish > 0:
                 return
-                
         elif target_key == "fuel":
-            # 18 = Case d'eau d'accès au carburant (Stations Rouges / Bas)
-            if current_terrain == 18 and self.fuel < self.fuel_capacity:
+            # 8 = eau adjacente a une station carburant
+            if (
+                current_terrain == self.model.FUEL_ADJACENT
+                and self.fuel < self.fuel_capacity
+            ):
                 return
 
         flow_fields = getattr(self.model, "flow_fields", {})
@@ -213,9 +230,11 @@ class Boat(Agent):
         next_pos = self._select_best_neighbor_cell(combined_dx, combined_dy)
 
         if next_pos and next_pos != self.pos:
-            self.model.grid.move_agent(self, next_pos)
-            self.fuel = max(0.0, self.fuel - self.fuel_consumption)
+            dx = next_pos[0] - self.pos[0]
+            dy = next_pos[1] - self.pos[1]
+            direction = self._direction_from_delta(dx, dy)
+            if self.model._move_boat(self, dx, dy, direction=direction):
+                self.fuel = max(0.0, self.fuel - self.fuel_consumption)
 
     def step(self) -> None:
         self.move(target_key="deposit")
-        return getattr(self, "pos", None)

@@ -1,5 +1,3 @@
-from model.model import World
-from model.scenario import Scenario
 import solara
 from matplotlib.figure import Figure
 from mesa.visualization import SolaraViz
@@ -7,20 +5,15 @@ from mesa.visualization.components import PropertyLayerStyle
 from mesa.visualization.mpl_space_drawing import draw_property_layers
 from mesa.visualization.utils import update_counter
 
+from model.entities.boat import Boat
+from model.model import World
+from model.scenario import Scenario
 from model.visualization.boat_portrayal import draw_boats
 
 water_color = "#1f77b4"
 fuel_color = "#BFBFBF"
 deposit_color = "#8F786D"
 entry_exit_color = "#26A69A"
-
-from model.entities.boat import Boat
-from model.model import World
-from model.scenario import Scenario
-
-water_color = "#1f77b4"
-deposit_color = "#BFBFBF"  # Blanc/Gris clair pour le DÉCHARGEMENT (Haut)
-fuel_color = "#8F786D"     # Marron/Rouge pour le CARBURANT (Bas)
 
 
 def blend_colors(start: str, end: str, amount: float) -> str:
@@ -33,12 +26,7 @@ def blend_colors(start: str, end: str, amount: float) -> str:
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
 
-# L'ordre est essentiel : deposit_color à l'index 2, fuel_color à l'index 3.
-
-
-# 1. Génère les accès blancs (dont l'ID 8)
-# 2. Génère les accès rouges (dont l'ID 18)
-
+# Ordre des valeurs de terrain : 0=eau, 1=terre, 2=carburant, 3=depot, 4=entree.
 colors = [water_color, "#8fbc8f", fuel_color, deposit_color, entry_exit_color]
 for station_color in (fuel_color, deposit_color):
     for band in range(1, 11):
@@ -51,30 +39,10 @@ def propertylayer_portrayal(layer):
             colormap=colors,
             alpha=0.8,
             vmin=0,
-            vmax=23,
+            vmax=24,
             colorbar=False,
         )
     return None
-
-
-def agent_portrayal(agent):
-    if isinstance(agent, Boat):
-        fish_ratio = (
-            agent.fish / agent.capacity if agent.capacity > 0 else 0
-        )
-        return {
-            "color": blend_colors("#ffffff", "#ff0000", fish_ratio),
-            "marker": "o",
-            "size": 100 + fish_ratio * 400,
-        }
-    return {
-        "color": "#000000",
-        "marker": "o",
-        "size": 50,
-    }
-
-
-
 
 
 @solara.component
@@ -102,7 +70,6 @@ def space_component(model):
     solara.FigureMatplotlib(fig, format="png", bbox_inches="tight")
 
 
-
 @solara.component
 def score_component(model):
     solara.Markdown(
@@ -127,7 +94,8 @@ scenario = Scenario(
 
 model = World(scenario, demo_boat_fish=None)
 
-spawn_pos = (1, 1)
+# Bateau de demonstration du pathfinding : grand bateau (3x2) qui rejoint le
+# depot en suivant le flow field.
 test_boat = Boat(
     size=3,
     name="Test Boat Pathfinding",
@@ -136,11 +104,10 @@ test_boat = Boat(
     fuel_consuption=1,
     fish=30,
 )
-model.add_boat(test_boat, spawn_pos)
+model.add_boat(test_boat, (1, 1))
 
 page = SolaraViz(
     model,
     components=[score_component, space_component],
-    model_params={"scenario": scenario, "demo_boat_fish": 20},
-    name="Port Simulation",
+    name="Port Simulation - Pathfinding Flow Field",
 )
