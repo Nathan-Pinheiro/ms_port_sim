@@ -32,6 +32,9 @@ for station_color in (deposit_color, fuel_color):
     for band in range(1, 11):
         colors.append(blend_colors(water_color, station_color, band / 10))
 
+# Eau calme : bleu mer peu profonde. Eau agitee : bleu tres fonce.
+agitation_colors = ["#8ecae6", "#012a4a"]
+
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":
@@ -43,11 +46,13 @@ def propertylayer_portrayal(layer):
             colorbar=False,
         )
     if layer.name == "agitation":
-        # Calme = clair (Blanc/Bleu pale), agite = fonce (Bleu profond).
+        # Calme = bleu mer peu profonde, agite = bleu tres fonce.
+        # vmin > 0 est volontaire : les cases non navigables valent NaN et
+        # doivent rester transparentes (sinon Mesa calcule np.min(data) = NaN).
         return PropertyLayerStyle(
-            colormap="Blues",
-            alpha=0.55,
-            vmin=0.0,
+            colormap=agitation_colors,
+            alpha=0.85,
+            vmin=0.001,
             vmax=1.0,
             colorbar=False,
         )

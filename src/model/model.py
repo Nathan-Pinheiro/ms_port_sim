@@ -119,7 +119,14 @@ class World(Model):
         self.grid.add_property_layer(agitation_layer)
         for x in range(width):
             for y in range(height):
-                agitation_layer.set_cell((x, y), self.agitation[x][y])
+                # NaN = pas de couleur d'agitation (terre/stations) : la case
+                # reste transparente au lieu de devenir claire.
+                value = (
+                    self.agitation[x][y]
+                    if terrain_layer.data[x][y] in self.NAVIGABLE
+                    else float("nan")
+                )
+                agitation_layer.set_cell((x, y), value)
 
         # Le champ de depot doit exister avant le premier pas de simulation.
         self.update_deposit_flow_field()
@@ -215,7 +222,23 @@ class World(Model):
                         clearance[nx][ny] = clearance[cx][cy] + 1
                         queue.append((nx, ny))
 
+        # Largeur maximale d'un chenal : sert d'échelle et de valeur au large.
+        max_clearance = max(
+            (
+                clearance[x][y]
+                for x in range(width)
+                for y in range(height)
+                if terrain[x][y] in self.NAVIGABLE
+            ),
+            default=1.0,
+        )
+        if max_clearance == float("inf") or max_clearance <= 0:
+            max_clearance = 1.0
+
         # --- ÉTAPE 2 : propagation du goulot depuis le large ---
+        # Le large est toujours à agitation maximale. La largeur portée par
+        # une case limite les cases situées DERRIÈRE elle : un passage étroit
+        # rend donc tout le bassin calme, sans éclaircir ses berges.
         bottleneck = [[0.0] * height for _ in range(width)]
         pq: list[tuple[float, int, int]] = []
 
@@ -231,7 +254,7 @@ class World(Model):
                     or y == height - 1
                 )
                 if is_sea:
-                    bottleneck[x][y] = clearance[x][y]
+                    bottleneck[x][y] = max_clearance
                     heapq.heappush(pq, (-bottleneck[x][y], x, y))
 
         while pq:
@@ -248,22 +271,19 @@ class World(Model):
                 if terrain[nx][ny] not in self.NAVIGABLE:
                     continue
 
-                # Le goulot du voisin est limité par le nôtre et sa largeur.
-                new_b = min(b, clearance[nx][ny])
+                # C'est la largeur de la case de sortie du passage qui limite
+                # le voisin, pas la largeur locale du voisin.
+                new_b = min(b, clearance[cx][cy])
                 if new_b > bottleneck[nx][ny]:
                     bottleneck[nx][ny] = new_b
                     heapq.heappush(pq, (-new_b, nx, ny))
 
         # --- ÉTAPE 3 : transformation en score d'agitation ---
-        max_b = max(max(row) for row in bottleneck)
-        if max_b == 0:
-            max_b = 1
-
         agitation = [[0.0] * height for _ in range(width)]
         for x in range(width):
             for y in range(height):
                 if terrain[x][y] in self.NAVIGABLE:
-                    agitation[x][y] = bottleneck[x][y] / max_b
+                    agitation[x][y] = bottleneck[x][y] / max_clearance
                 else:
                     agitation[x][y] = 0.0
 
