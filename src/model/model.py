@@ -1,3 +1,6 @@
+import heapq
+from collections import deque
+
 from mesa import Agent, Model
 from mesa.space import PropertyLayer, SingleGrid
 
@@ -108,6 +111,16 @@ class World(Model):
             )
         self.boat_spawn_position = self.entry_exit_cells[0]
 
+        # L'agitation est fixe : calculee une fois au demarrage.
+        self.agitation = self.compute_agitation()
+        agitation_layer = PropertyLayer(
+            "agitation", width, height, default_value=0.0, dtype=float
+        )
+        self.grid.add_property_layer(agitation_layer)
+        for x in range(width):
+            for y in range(height):
+                agitation_layer.set_cell((x, y), self.agitation[x][y])
+
         # Le champ de depot doit exister avant le premier pas de simulation.
         self.update_deposit_flow_field()
 
@@ -160,6 +173,101 @@ class World(Model):
                     row[x] = 8 if neighbors[0] == 2 else 18
 
         return expanded_tiles
+
+    def compute_agitation(self) -> list[list[float]]:
+        """Calcule l'agitation de l'eau (0.0 = calme/éclusé, 1.0 = agité/large).
+
+        Utilise un algorithme de « plus large chemin » (Maximin) pour trouver
+        le goulot d'étranglement que l'eau doit traverser pour atteindre le
+        large. Le résultat est indexé ``agitation[x][y]``.
+        """
+        width = self.grid.width
+        height = self.grid.height
+        terrain = self.grid.properties["terrain"].data
+        dirs = [
+            (0, 1),
+            (0, -1),
+            (1, 0),
+            (-1, 0),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ]
+
+        # --- ÉTAPE 1 : distance à la terre la plus proche (clearance) ---
+        clearance = [[float("inf")] * height for _ in range(width)]
+        queue: deque[tuple[int, int]] = deque()
+
+        # Toutes les cases non navigables servent de sources.
+        for x in range(width):
+            for y in range(height):
+                if terrain[x][y] not in self.NAVIGABLE:
+                    clearance[x][y] = 0
+                    queue.append((x, y))
+
+        while queue:
+            cx, cy = queue.popleft()
+            for dx, dy in dirs:
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    if clearance[nx][ny] > clearance[cx][cy] + 1:
+                        clearance[nx][ny] = clearance[cx][cy] + 1
+                        queue.append((nx, ny))
+
+        # --- ÉTAPE 2 : propagation du goulot depuis le large ---
+        bottleneck = [[0.0] * height for _ in range(width)]
+        pq: list[tuple[float, int, int]] = []
+
+        for x in range(width):
+            for y in range(height):
+                if terrain[x][y] not in self.NAVIGABLE:
+                    continue
+                is_sea = (
+                    terrain[x][y] == self.ENTRY_EXIT
+                    or x == 0
+                    or x == width - 1
+                    or y == 0
+                    or y == height - 1
+                )
+                if is_sea:
+                    bottleneck[x][y] = clearance[x][y]
+                    heapq.heappush(pq, (-bottleneck[x][y], x, y))
+
+        while pq:
+            neg_b, cx, cy = heapq.heappop(pq)
+            b = -neg_b
+
+            if b < bottleneck[cx][cy]:
+                continue
+
+            for dx, dy in dirs:
+                nx, ny = cx + dx, cy + dy
+                if not (0 <= nx < width and 0 <= ny < height):
+                    continue
+                if terrain[nx][ny] not in self.NAVIGABLE:
+                    continue
+
+                # Le goulot du voisin est limité par le nôtre et sa largeur.
+                new_b = min(b, clearance[nx][ny])
+                if new_b > bottleneck[nx][ny]:
+                    bottleneck[nx][ny] = new_b
+                    heapq.heappush(pq, (-new_b, nx, ny))
+
+        # --- ÉTAPE 3 : transformation en score d'agitation ---
+        max_b = max(max(row) for row in bottleneck)
+        if max_b == 0:
+            max_b = 1
+
+        agitation = [[0.0] * height for _ in range(width)]
+        for x in range(width):
+            for y in range(height):
+                if terrain[x][y] in self.NAVIGABLE:
+                    agitation[x][y] = bottleneck[x][y] / max_b
+                else:
+                    agitation[x][y] = 0.0
+
+        return agitation
 
     def is_cell_walkable(self, x: int, y: int) -> bool:
         """Indique si la case ``(x, y)`` est navigable (independamment d'un bateau)."""
@@ -296,23 +404,32 @@ class World(Model):
         if boat.position is None:
             return False
 
+        x, y = boat.position
+        agitation = self.agitation[x][y]
+
+        # Efficacité de 1.0 (eau calme) à 0.2 (eau très agitée).
+        efficiency = max(0.2, 1.0 - agitation * 0.8)
+
         serviced = False
         zones = self.zones_at_position(boat.position)
 
         if "deposit" in zones and boat.fish > 0:
-            boat.fish -= 1
-            self.total_fish_deposited += 1
-            self.total_reimbursed_price += self.fish_price
-            self.score += self.fish_price
-            serviced = True
+            # En eau agitée, le poisson peut être baladé et le dépôt échoue.
+            if self.random.random() < efficiency:
+                boat.fish -= 1
+                self.total_fish_deposited += 1
+                self.total_reimbursed_price += self.fish_price
+                self.score += self.fish_price
+                serviced = True
 
         if "fuel" in zones and boat.fuel < self.fuel_threshold:
-            refilled = boat.fuel_capacity - boat.fuel
-            boat.fuel = boat.fuel_capacity
-            self.total_fuel_refilled += refilled
-            self.total_fuel_paid += refilled * self.fuel_price
-            self.score -= refilled * self.fuel_price
-            serviced = True
+            if self.random.random() < efficiency:
+                refilled = boat.fuel_capacity - boat.fuel
+                boat.fuel = boat.fuel_capacity
+                self.total_fuel_refilled += refilled
+                self.total_fuel_paid += refilled * self.fuel_price
+                self.score -= refilled * self.fuel_price
+                serviced = True
 
         if serviced:
             self.total_boats_serviced += 1

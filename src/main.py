@@ -42,6 +42,15 @@ def propertylayer_portrayal(layer):
             vmax=24,
             colorbar=False,
         )
+    if layer.name == "agitation":
+        # Calme = clair (Blanc/Bleu pale), agite = fonce (Bleu profond).
+        return PropertyLayerStyle(
+            colormap="Blues",
+            alpha=0.55,
+            vmin=0.0,
+            vmax=1.0,
+            colorbar=False,
+        )
     return None
 
 
