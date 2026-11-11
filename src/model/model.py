@@ -1,4 +1,4 @@
-import heapq
+import math
 from collections import deque
 
 from mesa import Agent, Model
@@ -182,110 +182,138 @@ class World(Model):
         return expanded_tiles
 
     def compute_agitation(self) -> list[list[float]]:
-        """Calcule l'agitation de l'eau (0.0 = calme/éclusé, 1.0 = agité/large).
+        """Calcule l'agitation de l'eau (0.0 = calme, 1.0 = agité).
 
-        Utilise un algorithme de « plus large chemin » (Maximin) pour trouver
-        le goulot d'étranglement que l'eau doit traverser pour atteindre le
-        large. Le résultat est indexé ``agitation[x][y]``.
+        Méthode des « trajets opposés » : pour chaque case d'eau, on regarde la
+        direction du premier pas du plus court chemin vers chacune des cases de
+        large (les entrées/sorties de la carte). Dans un bassin enclos, tous ces
+        chemins sortent par le même chenal : les directions se ressemblent et
+        l'écart angulaire maximal reste faible, donc l'eau est calme. En eau
+        ouverte, les chemins vers des entrées opposées partent dans des
+        directions opposées : l'écart angulaire maximal est grand, donc l'eau
+        est agitée.
+
+        Le résultat est indexé ``agitation[x][y]``.
         """
         width = self.grid.width
         height = self.grid.height
         terrain = self.grid.properties["terrain"].data
-        dirs = [
-            (0, 1),
-            (0, -1),
+
+        # 8 directions, chacune associée à son angle.
+        steps = [
             (1, 0),
-            (-1, 0),
             (1, 1),
-            (1, -1),
+            (0, 1),
             (-1, 1),
+            (-1, 0),
             (-1, -1),
+            (0, -1),
+            (1, -1),
+        ]
+        angles = [math.atan2(dy, dx) for dx, dy in steps]
+        angle_diff = [
+            [
+                min(
+                    abs(angles[i] - angles[j]),
+                    2 * math.pi - abs(angles[i] - angles[j]),
+                )
+                for j in range(8)
+            ]
+            for i in range(8)
         ]
 
-        # --- ÉTAPE 1 : distance à la terre la plus proche (clearance) ---
-        clearance = [[float("inf")] * height for _ in range(width)]
-        queue: deque[tuple[int, int]] = deque()
+        def is_navigable(x: int, y: int) -> bool:
+            return (
+                0 <= x < width
+                and 0 <= y < height
+                and terrain[x][y] in self.NAVIGABLE
+            )
 
-        # Toutes les cases non navigables servent de sources.
-        for x in range(width):
-            for y in range(height):
-                if terrain[x][y] not in self.NAVIGABLE:
-                    clearance[x][y] = 0
-                    queue.append((x, y))
+        # Aplatit les cases navigables pour des parcours en largeur rapides.
+        cells: list[tuple[int, int]] = []
+        index: dict[tuple[int, int], int] = {}
+        for y in range(height):
+            for x in range(width):
+                if is_navigable(x, y):
+                    index[(x, y)] = len(cells)
+                    cells.append((x, y))
+        count = len(cells)
+        if count == 0:
+            return [[0.0] * height for _ in range(width)]
 
-        while queue:
-            cx, cy = queue.popleft()
-            for dx, dy in dirs:
-                nx, ny = cx + dx, cy + dy
-                if 0 <= nx < width and 0 <= ny < height:
-                    if clearance[nx][ny] > clearance[cx][cy] + 1:
-                        clearance[nx][ny] = clearance[cx][cy] + 1
-                        queue.append((nx, ny))
+        neighbours: list[list[tuple[int, int]]] = [[] for _ in range(count)]
+        for i, (x, y) in enumerate(cells):
+            for direction, (dx, dy) in enumerate(steps):
+                j = index.get((x + dx, y + dy))
+                if j is not None:
+                    neighbours[i].append((j, direction))
 
-        # Largeur maximale d'un chenal : sert d'échelle et de valeur au large.
-        max_clearance = max(
-            (
-                clearance[x][y]
-                for x in range(width)
-                for y in range(height)
-                if terrain[x][y] in self.NAVIGABLE
-            ),
-            default=1.0,
-        )
-        if max_clearance == float("inf") or max_clearance <= 0:
-            max_clearance = 1.0
+        # Cases de large : les entrées/sorties, sinon le bord navigable.
+        open_ids = [
+            index[(x, y)]
+            for x in range(width)
+            for y in range(height)
+            if terrain[x][y] == self.ENTRY_EXIT
+        ]
+        if not open_ids:
+            open_ids = [
+                index[(x, y)]
+                for (x, y) in cells
+                if x in (0, width - 1) or y in (0, height - 1)
+            ]
 
-        # --- ÉTAPE 2 : propagation du goulot depuis le large ---
-        # Le large est toujours à agitation maximale. La largeur portée par
-        # une case limite les cases situées DERRIÈRE elle : un passage étroit
-        # rend donc tout le bassin calme, sans éclaircir ses berges.
-        bottleneck = [[0.0] * height for _ in range(width)]
-        pq: list[tuple[float, int, int]] = []
+        # Un sous-échantillon régulier suffit : des entrées voisines donnent des
+        # directions quasi identiques. Cela garde le calcul rapide au démarrage.
+        stride = max(1, len(open_ids) // 150)
+        open_ids = open_ids[::stride]
 
-        for x in range(width):
-            for y in range(height):
-                if terrain[x][y] not in self.NAVIGABLE:
+        # Pour chaque case, masque binaire des directions de sortie observées.
+        out_dirs = [0] * count
+        distance = [-1] * count
+
+        for source in open_ids:
+            for i in range(count):
+                distance[i] = -1
+            distance[source] = 0
+            queue: deque[int] = deque([source])
+            while queue:
+                current = queue.popleft()
+                next_distance = distance[current] + 1
+                for neighbour, _ in neighbours[current]:
+                    if distance[neighbour] < 0:
+                        distance[neighbour] = next_distance
+                        queue.append(neighbour)
+
+            # Direction du premier pas vers cette entrée.
+            for i in range(count):
+                dist = distance[i]
+                if dist <= 0:
                     continue
-                is_sea = (
-                    terrain[x][y] == self.ENTRY_EXIT
-                    or x == 0
-                    or x == width - 1
-                    or y == 0
-                    or y == height - 1
-                )
-                if is_sea:
-                    bottleneck[x][y] = max_clearance
-                    heapq.heappush(pq, (-bottleneck[x][y], x, y))
+                for neighbour, direction in neighbours[i]:
+                    if distance[neighbour] == dist - 1:
+                        out_dirs[i] |= 1 << direction
+                        break
 
-        while pq:
-            neg_b, cx, cy = heapq.heappop(pq)
-            b = -neg_b
-
-            if b < bottleneck[cx][cy]:
+        agitation = [[0.0] * height for _ in range(width)]
+        for i, (x, y) in enumerate(cells):
+            if terrain[x][y] == self.ENTRY_EXIT:
+                # Le large lui-même est toujours agité.
+                agitation[x][y] = 1.0
                 continue
 
-            for dx, dy in dirs:
-                nx, ny = cx + dx, cy + dy
-                if not (0 <= nx < width and 0 <= ny < height):
-                    continue
-                if terrain[nx][ny] not in self.NAVIGABLE:
-                    continue
+            directions = [d for d in range(8) if out_dirs[i] >> d & 1]
+            if len(directions) < 2:
+                # Une seule direction de sortie : l'eau est enfermée, calme.
+                agitation[x][y] = 0.0
+                continue
 
-                # C'est la largeur de la case de sortie du passage qui limite
-                # le voisin, pas la largeur locale du voisin.
-                new_b = min(b, clearance[cx][cy])
-                if new_b > bottleneck[nx][ny]:
-                    bottleneck[nx][ny] = new_b
-                    heapq.heappush(pq, (-new_b, nx, ny))
-
-        # --- ÉTAPE 3 : transformation en score d'agitation ---
-        agitation = [[0.0] * height for _ in range(width)]
-        for x in range(width):
-            for y in range(height):
-                if terrain[x][y] in self.NAVIGABLE:
-                    agitation[x][y] = bottleneck[x][y] / max_clearance
-                else:
-                    agitation[x][y] = 0.0
+            widest = 0.0
+            for a in range(len(directions)):
+                for b in range(a + 1, len(directions)):
+                    diff = angle_diff[directions[a]][directions[b]]
+                    if diff > widest:
+                        widest = diff
+            agitation[x][y] = widest / math.pi
 
         return agitation
 
