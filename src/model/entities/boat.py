@@ -187,7 +187,9 @@ class Boat(Agent):
             # Un grand bateau doit pouvoir tourner pour emprunter la case :
             # on valide l'empreinte dans la direction du deplacement.
             self.direction = self._direction_from_delta(dir_x, dir_y)
-            can_move = self.model.can_place_boat(self, (nx, ny))
+            can_move = self.model.can_place_boat(
+                self, (nx, ny)
+            ) and self.model.grid.is_cell_empty((nx, ny))
             if not can_move:
                 continue
 
@@ -208,11 +210,11 @@ class Boat(Agent):
         ][self.pos[1]]
 
         if target_key == "deposit":
-            # 18 = eau adjacente a une station de depot
+            # 8 = eau adjacente a une station de depot
             if current_terrain == self.model.DEPOSIT_ADJACENT and self.fish > 0:
                 return
         elif target_key == "fuel":
-            # 8 = eau adjacente a une station carburant
+            # 18 = eau adjacente a une station carburant
             if (
                 current_terrain == self.model.FUEL_ADJACENT
                 and self.fuel < self.fuel_capacity
