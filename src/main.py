@@ -15,7 +15,6 @@ deposit_color = "#BFBFBF"
 fuel_color = "#8F786D"
 entry_exit_color = "#1f77b4"
 
-
 def blend_colors(start: str, end: str, amount: float) -> str:
     start_rgb = tuple(int(start[i : i + 2], 16) for i in (1, 3, 5))
     end_rgb = tuple(int(end[i : i + 2], 16) for i in (1, 3, 5))
@@ -25,16 +24,12 @@ def blend_colors(start: str, end: str, amount: float) -> str:
     ]
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
-
-# Ordre des valeurs de terrain : 0=eau, 1=terre, 2=depot, 3=carburant, 4=entree.
 colors = [water_color, "#8fbc8f", deposit_color, fuel_color, entry_exit_color]
 for station_color in (deposit_color, fuel_color):
     for band in range(1, 11):
         colors.append(blend_colors(water_color, station_color, band / 10))
 
-# Eau calme : bleu mer peu profonde. Eau agitee : bleu tres fonce.
-agitation_colors = ["#8ecae6", "#012a4a"]
-
+agitation_colors = ["#1f77b4", "#0B66AC"]
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":

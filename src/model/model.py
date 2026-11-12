@@ -21,13 +21,13 @@ class World(Model):
 
     Le terrain est une ``PropertyLayer`` dont les valeurs sont :
 
-    * ``0``  – eau navigable
-    * ``1``  – terre
-    * ``2``  – station de dépôt
-    * ``3``  – station carburant
-    * ``4``  – case d'entrée / sortie (franchissable, comme l'eau)
-    * ``8``  – eau adjacente à une station de dépôt
-    * ``18`` – eau adjacente à une station carburant
+    * ``0``  eau navigable
+    * ``1``  terre
+    * ``2``  station de dépôt
+    * ``3``  station carburant
+    * ``4``  case d'entrée / sortie (franchissable, comme l'eau)
+    * ``8``  eau adjacente à une station de dépôt
+    * ``18`` eau adjacente à une station carburant
     """
 
     fuel_threshold = 25.0
