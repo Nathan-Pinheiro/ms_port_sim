@@ -37,5 +37,7 @@ class Scenario:
     fish_standard_deviation: float = 5.0
     fish_price: float = 1.0
     fuel_price: float = 1.0
+    fuel_station_construction_cost: int = 10_000_000
+    deposit_station_construction_cost: int = 20_000_000
     boat_scale: float = 1.0
     seed: int | None = None
