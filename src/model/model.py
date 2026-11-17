@@ -48,6 +48,8 @@ class World(Model):
     STEPS_PER_HOUR = 300
     SIMULATION_HOURS = 24
     MAX_STEPS = STEPS_PER_HOUR * SIMULATION_HOURS
+    REVENUE_INTERVAL_MINUTES = 30
+    STEPS_PER_REVENUE_INTERVAL = STEPS_PER_HOUR * REVENUE_INTERVAL_MINUTES // 60
 
     def __init__(self, scenario: Scenario = Scenario(), demo_boat_fish: int | None = None):
         if scenario.scale < 1 or isinstance(scenario.scale, bool):
@@ -88,6 +90,10 @@ class World(Model):
         self.total_boats_serviced = 0
         self.boats_teleported_to_deposit = 0
         self.boats_spawned = 0
+        # Revenus encaissés par intervalle de 30 minutes simulées.
+        self.revenue_per_interval: list[float] = []
+        self.current_interval_revenue = 0.0
+        self._last_total_revenue = 0.0
 
         # Champs de vecteurs (flow fields) utilises par le pathfinding
         self.flow_fields: dict = {}
@@ -752,9 +758,19 @@ class World(Model):
             if boat.fish <= 0:
                 self._finish_deposit(boat)
 
+        self._record_revenue()
         self.steps += 1
         if self.steps >= self.MAX_STEPS:
             self.running = False
+
+    def _record_revenue(self) -> None:
+        """Accumule les revenus et clôt un intervalle toutes les 30 minutes."""
+        current_total = self.total_revenue
+        self.current_interval_revenue += current_total - self._last_total_revenue
+        self._last_total_revenue = current_total
+        if (self.steps + 1) % self.STEPS_PER_REVENUE_INTERVAL == 0:
+            self.revenue_per_interval.append(self.current_interval_revenue)
+            self.current_interval_revenue = 0.0
 
     @property
     def simulation_time(self) -> str:
@@ -811,6 +827,61 @@ class World(Model):
     def profit(self) -> float:
         """Return total station revenue minus total construction cost."""
         return self.total_revenue - self.total_cost
+
+    @property
+    def elapsed_hours(self) -> float:
+        """Temps de simulation écoulé, en heures (fractionnaire)."""
+        return self.steps / self.STEPS_PER_HOUR
+
+    @property
+    def revenue_per_hour(self) -> float:
+        """Recette moyenne par heure simulée depuis le début."""
+        if self.elapsed_hours <= 0:
+            return 0.0
+        return self.total_revenue / self.elapsed_hours
+
+    @property
+    def estimated_daily_revenue(self) -> float:
+        """Recette journalière estimée à partir de la moyenne horaire.
+
+        Tant que peu de temps s'est écoulé, l'estimation est brute (la recette
+        de la première heure est multipliée par 24) puis elle s'affine au fur
+        et à mesure que la moyenne porte sur plus d'heures.
+        """
+        return self.revenue_per_hour * 24
+
+    @property
+    def estimated_annual_revenue(self) -> float:
+        """Recette annuelle estimée (365 jours)."""
+        return self.estimated_daily_revenue * 365
+
+    @property
+    def estimated_break_even_days(self) -> float | None:
+        """Nombre de jours estimés pour rentabiliser tout le port."""
+        if self.estimated_daily_revenue <= 0:
+            return None
+        return self.total_cost / self.estimated_daily_revenue
+
+    @property
+    def estimated_break_even_years(self) -> float | None:
+        """Nombre d'années estimées pour rentabiliser tout le port."""
+        days = self.estimated_break_even_days
+        return None if days is None else days / 365
+
+    @property
+    def estimated_days_remaining(self) -> float | None:
+        """Jours restants estimés avant le seuil de rentabilité."""
+        if self.estimated_daily_revenue <= 0:
+            return None
+        remaining = max(0.0, self.total_cost - self.total_revenue)
+        return remaining / self.estimated_daily_revenue
+
+    @property
+    def estimated_annual_roi(self) -> float | None:
+        """Rentabilité annuelle estimée (recette annuelle / coût du port)."""
+        if self.total_cost <= 0 or self.elapsed_hours <= 0:
+            return None
+        return self.estimated_annual_revenue / self.total_cost
 
     def service_boat(self, boat: Boat) -> bool:
         """Dépose le poisson et remplit le carburant si le bateau touche une zone."""
