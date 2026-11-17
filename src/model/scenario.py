@@ -32,7 +32,7 @@ class Scenario:
     tiles: tuple[tuple[int, ...], ...] = PORTO_TILES
     scale: int = 3
     torus: bool = False
-    ship_spawn_rate: float = 0.1
+    ship_spawn_rate: float = 0.04
     fish_amount: int = 50
     fish_standard_deviation: float = 5.0
     fish_price: float = 1.0
