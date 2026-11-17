@@ -1,7 +1,11 @@
+import math
+from collections import deque
+
 from mesa import Agent, Model
 from mesa.space import PropertyLayer, SingleGrid
 
 from model.entities.boat import (
+    BOAT_FOOTPRINTS,
     Boat,
     DIRECTION_EAST,
     DIRECTION_NORTH,
@@ -17,13 +21,13 @@ class World(Model):
 
     Le terrain est une ``PropertyLayer`` dont les valeurs sont :
 
-    * ``0``  – eau navigable
-    * ``1``  – terre
-    * ``2``  – station carburant
-    * ``3``  – station de dépôt
-    * ``4``  – case d'entrée / sortie (franchissable, comme l'eau)
-    * ``8``  – eau adjacente à une station carburant
-    * ``18`` – eau adjacente à une station de dépôt
+    * ``0``  eau navigable
+    * ``1``  terre
+    * ``2``  station de dépôt
+    * ``3``  station carburant
+    * ``4``  case d'entrée / sortie (franchissable, comme l'eau)
+    * ``8``  eau adjacente à une station de dépôt
+    * ``18`` eau adjacente à une station carburant
     """
 
     fuel_threshold = 25.0
@@ -31,11 +35,11 @@ class World(Model):
 
     WATER = 0
     TERRAIN = 1
-    FUEL_STATION = 2
-    DEPOSIT_STATION = 3
+    FUEL_STATION = 3
+    DEPOSIT_STATION = 2
     ENTRY_EXIT = 4
-    FUEL_ADJACENT = 8
-    DEPOSIT_ADJACENT = 18
+    FUEL_ADJACENT = 18
+    DEPOSIT_ADJACENT = 8
 
     # Cellules sur lesquelles un bateau peut naviguer (empreinte complète).
     NAVIGABLE = frozenset({WATER, ENTRY_EXIT, FUEL_ADJACENT, DEPOSIT_ADJACENT})
@@ -66,6 +70,7 @@ class World(Model):
         self.total_fuel_paid = 0.0
         self.total_boats_serviced = 0
         self.boats_teleported_to_deposit = 0
+        self.boats_spawned = 0
 
         # Champs de vecteurs (flow fields) utilises par le pathfinding
         self.flow_fields: dict = {}
@@ -105,6 +110,23 @@ class World(Model):
                 f"(valeur {self.ENTRY_EXIT}). Vérifie PORTO_TILES."
             )
         self.boat_spawn_position = self.entry_exit_cells[0]
+
+        # L'agitation est fixe : calculee une fois au demarrage.
+        self.agitation = self.compute_agitation()
+        agitation_layer = PropertyLayer(
+            "agitation", width, height, default_value=0.0, dtype=float
+        )
+        self.grid.add_property_layer(agitation_layer)
+        for x in range(width):
+            for y in range(height):
+                # NaN = pas de couleur d'agitation (terre/stations) : la case
+                # reste transparente au lieu de devenir claire.
+                value = (
+                    self.agitation[x][y]
+                    if terrain_layer.data[x][y] in self.NAVIGABLE
+                    else float("nan")
+                )
+                agitation_layer.set_cell((x, y), value)
 
         # Le champ de depot doit exister avant le premier pas de simulation.
         self.update_deposit_flow_field()
@@ -154,9 +176,146 @@ class World(Model):
                     and expanded_tiles[ny][nx] in (2, 3)
                 ]
                 if neighbors:
+                    # 2 = depot -> acces 8 ; 3 = carburant -> acces 18
                     row[x] = 8 if neighbors[0] == 2 else 18
 
         return expanded_tiles
+
+    def compute_agitation(self) -> list[list[float]]:
+        """Calcule l'agitation de l'eau (0.0 = calme, 1.0 = agité).
+
+        Méthode des « trajets opposés » : pour chaque case d'eau, on regarde la
+        direction du premier pas du plus court chemin vers chacune des cases de
+        large (les entrées/sorties de la carte). Dans un bassin enclos, tous ces
+        chemins sortent par le même chenal : les directions se ressemblent et
+        l'écart angulaire maximal reste faible, donc l'eau est calme. En eau
+        ouverte, les chemins vers des entrées opposées partent dans des
+        directions opposées : l'écart angulaire maximal est grand, donc l'eau
+        est agitée.
+
+        Le résultat est indexé ``agitation[x][y]``.
+        """
+        width = self.grid.width
+        height = self.grid.height
+        terrain = self.grid.properties["terrain"].data
+
+        # 8 directions, chacune associée à son angle.
+        steps = [
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+        ]
+        angles = [math.atan2(dy, dx) for dx, dy in steps]
+        angle_diff = [
+            [
+                min(
+                    abs(angles[i] - angles[j]),
+                    2 * math.pi - abs(angles[i] - angles[j]),
+                )
+                for j in range(8)
+            ]
+            for i in range(8)
+        ]
+
+        def is_navigable(x: int, y: int) -> bool:
+            return (
+                0 <= x < width
+                and 0 <= y < height
+                and terrain[x][y] in self.NAVIGABLE
+            )
+
+        # Aplatit les cases navigables pour des parcours en largeur rapides.
+        cells: list[tuple[int, int]] = []
+        index: dict[tuple[int, int], int] = {}
+        for y in range(height):
+            for x in range(width):
+                if is_navigable(x, y):
+                    index[(x, y)] = len(cells)
+                    cells.append((x, y))
+        count = len(cells)
+        if count == 0:
+            return [[0.0] * height for _ in range(width)]
+
+        neighbours: list[list[tuple[int, int]]] = [[] for _ in range(count)]
+        for i, (x, y) in enumerate(cells):
+            for direction, (dx, dy) in enumerate(steps):
+                j = index.get((x + dx, y + dy))
+                if j is not None:
+                    neighbours[i].append((j, direction))
+
+        # Cases de large : les entrées/sorties, sinon le bord navigable.
+        open_ids = [
+            index[(x, y)]
+            for x in range(width)
+            for y in range(height)
+            if terrain[x][y] == self.ENTRY_EXIT
+        ]
+        if not open_ids:
+            open_ids = [
+                index[(x, y)]
+                for (x, y) in cells
+                if x in (0, width - 1) or y in (0, height - 1)
+            ]
+
+        # Un sous-échantillon régulier suffit : des entrées voisines donnent des
+        # directions quasi identiques. Cela garde le calcul rapide au démarrage.
+        stride = max(1, len(open_ids) // 150)
+        open_ids = open_ids[::stride]
+
+        # Pour chaque case, masque binaire des directions de sortie observées.
+        out_dirs = [0] * count
+        distance = [-1] * count
+
+        for source in open_ids:
+            for i in range(count):
+                distance[i] = -1
+            distance[source] = 0
+            queue: deque[int] = deque([source])
+            while queue:
+                current = queue.popleft()
+                next_distance = distance[current] + 1
+                for neighbour, _ in neighbours[current]:
+                    if distance[neighbour] < 0:
+                        distance[neighbour] = next_distance
+                        queue.append(neighbour)
+
+            # Direction du premier pas vers cette entrée.
+            for i in range(count):
+                dist = distance[i]
+                if dist <= 0:
+                    continue
+                for neighbour, direction in neighbours[i]:
+                    if distance[neighbour] == dist - 1:
+                        out_dirs[i] |= 1 << direction
+                        break
+
+        agitation = [[0.0] * height for _ in range(width)]
+        for i, (x, y) in enumerate(cells):
+            if terrain[x][y] == self.ENTRY_EXIT:
+                # Le large lui-même est toujours agité.
+                agitation[x][y] = 1.0
+                continue
+
+            directions = [d for d in range(8) if out_dirs[i] >> d & 1]
+            if len(directions) < 2:
+                # Une seule direction de sortie : l'eau est enfermée, calme.
+                agitation[x][y] = 0.0
+                continue
+
+            widest = 0.0
+            for a in range(len(directions)):
+                for b in range(a + 1, len(directions)):
+                    diff = angle_diff[directions[a]][directions[b]]
+                    if diff > widest:
+                        widest = diff
+            agitation[x][y] = widest / math.pi
+
+        return agitation
 
     def is_cell_walkable(self, x: int, y: int) -> bool:
         """Indique si la case ``(x, y)`` est navigable (independamment d'un bateau)."""
@@ -199,18 +358,85 @@ class World(Model):
             self.flow_fields["deposit"] = {}
 
     # ------------------------------------------------------------------ #
+    # Apparition des bateaux
+    # ------------------------------------------------------------------ #
+
+    def _find_spawn_placement(self, boat: Boat) -> tuple[int, int] | None:
+        """Trouve une case d'entree libre ou l'empreinte du bateau peut tenir."""
+        placements: list[tuple[tuple[int, int], int]] = []
+        for position in self.entry_exit_cells:
+            for direction in (
+                DIRECTION_NORTH,
+                DIRECTION_EAST,
+                DIRECTION_SOUTH,
+                DIRECTION_WEST,
+            ):
+                previous_direction = boat.direction
+                boat.direction = direction
+                fits = self.can_place_boat(boat, position) and all(
+                    self.grid.is_cell_empty(cell)
+                    for cell in boat.occupied_cells(position)
+                )
+                boat.direction = previous_direction
+                if fits:
+                    placements.append((position, direction))
+
+        if not placements:
+            return None
+
+        position, direction = self.random.choice(placements)
+        boat.direction = direction
+        return position
+
+    def spawn_boats(self) -> list[Boat]:
+        """Fait apparaitre un bateau aleatoire sur une entree libre.
+
+        ``ship_spawn_rate`` est la probabilite de spawn par pas de simulation.
+        Le poisson embarque suit une loi normale
+        ``(fish_amount, fish_standard_deviation)``, bornee a zero.
+        """
+        if self.ship_spawn_rate <= 0:
+            return []
+        if self.random.random() >= self.ship_spawn_rate:
+            return []
+
+        size = self.random.choice(tuple(BOAT_FOOTPRINTS))
+        fish = max(
+            0,
+            round(
+                self.random.gauss(
+                    self.fish_amount,
+                    self.fish_standard_deviation,
+                )
+            ),
+        )
+        boat = Boat(
+            size=size,
+            name=f"Boat {self.boats_spawned + 1}",
+            speed=1,
+            capacity=max(fish, self.fish_amount, 1),
+            fuel_consuption=1,
+            fish=fish,
+        )
+
+        position = self._find_spawn_placement(boat)
+        if position is None:
+            return []
+
+        self.add_boat(boat, position)
+        self.boats_spawned += 1
+        return [boat]
+
+    # ------------------------------------------------------------------ #
     # Boucle de simulation
     # ------------------------------------------------------------------ #
 
     def step(self):
-        """Téléporte les bateaux fraîchement spawnés vers le dépôt, puis traite les services."""
+        """Fait apparaitre de nouveaux bateaux puis traite deplacements et services."""
+        self.spawn_boats()
+
         for boat in list(self.boats):
             if boat.position is None:
-                continue
-
-            if boat.position == self.boat_spawn_position:
-                self.grid.move_agent(boat, self.deposit_access_position)
-                self.boats_teleported_to_deposit += 1
                 continue
 
             boat.step()
@@ -226,23 +452,32 @@ class World(Model):
         if boat.position is None:
             return False
 
+        x, y = boat.position
+        agitation = self.agitation[x][y]
+
+        # Efficacité de 1.0 (eau calme) à 0.2 (eau très agitée).
+        efficiency = max(0.2, 1.0 - agitation * 0.8)
+
         serviced = False
         zones = self.zones_at_position(boat.position)
 
         if "deposit" in zones and boat.fish > 0:
-            boat.fish -= 1
-            self.total_fish_deposited += 1
-            self.total_reimbursed_price += self.fish_price
-            self.score += self.fish_price
-            serviced = True
+            # En eau agitée, le poisson peut être baladé et le dépôt échoue.
+            if self.random.random() < efficiency:
+                boat.fish -= 1
+                self.total_fish_deposited += 1
+                self.total_reimbursed_price += self.fish_price
+                self.score += self.fish_price
+                serviced = True
 
         if "fuel" in zones and boat.fuel < self.fuel_threshold:
-            refilled = boat.fuel_capacity - boat.fuel
-            boat.fuel = boat.fuel_capacity
-            self.total_fuel_refilled += refilled
-            self.total_fuel_paid += refilled * self.fuel_price
-            self.score -= refilled * self.fuel_price
-            serviced = True
+            if self.random.random() < efficiency:
+                refilled = boat.fuel_capacity - boat.fuel
+                boat.fuel = boat.fuel_capacity
+                self.total_fuel_refilled += refilled
+                self.total_fuel_paid += refilled * self.fuel_price
+                self.score -= refilled * self.fuel_price
+                serviced = True
 
         if serviced:
             self.total_boats_serviced += 1
@@ -318,7 +553,9 @@ class World(Model):
             boat.direction = int(direction) % 4
 
         target = (position[0] + dx, position[1] + dy)
-        if not self.can_place_boat(boat, target):
+        if not self.can_place_boat(boat, target) or not self.grid.is_cell_empty(
+            target
+        ):
             boat.direction = previous_direction
             return False
 

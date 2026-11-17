@@ -11,10 +11,9 @@ from model.scenario import Scenario
 from model.visualization.boat_portrayal import draw_boats
 
 water_color = "#1f77b4"
-fuel_color = "#BFBFBF"
-deposit_color = "#8F786D"
-entry_exit_color = "#26A69A"
-
+deposit_color = "#BFBFBF"
+fuel_color = "#8F786D"
+entry_exit_color = "#1f77b4"
 
 def blend_colors(start: str, end: str, amount: float) -> str:
     start_rgb = tuple(int(start[i : i + 2], 16) for i in (1, 3, 5))
@@ -25,13 +24,12 @@ def blend_colors(start: str, end: str, amount: float) -> str:
     ]
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
-
-# Ordre des valeurs de terrain : 0=eau, 1=terre, 2=carburant, 3=depot, 4=entree.
-colors = [water_color, "#8fbc8f", fuel_color, deposit_color, entry_exit_color]
-for station_color in (fuel_color, deposit_color):
+colors = [water_color, "#8fbc8f", deposit_color, fuel_color, entry_exit_color]
+for station_color in (deposit_color, fuel_color):
     for band in range(1, 11):
         colors.append(blend_colors(water_color, station_color, band / 10))
 
+agitation_colors = ["#1f77b4", "#0B66AC"]
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":
@@ -40,6 +38,17 @@ def propertylayer_portrayal(layer):
             alpha=0.8,
             vmin=0,
             vmax=24,
+            colorbar=False,
+        )
+    if layer.name == "agitation":
+        # Calme = bleu mer peu profonde, agite = bleu tres fonce.
+        # vmin > 0 est volontaire : les cases non navigables valent NaN et
+        # doivent rester transparentes (sinon Mesa calcule np.min(data) = NaN).
+        return PropertyLayerStyle(
+            colormap=agitation_colors,
+            alpha=0.85,
+            vmin=0.001,
+            vmax=1.0,
             colorbar=False,
         )
     return None
