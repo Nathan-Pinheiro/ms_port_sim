@@ -104,15 +104,36 @@ def space_component(model):
 
 
 @solara.component
+def time_component(model):
+    update_counter.get()
+    solara.Markdown(f"### Simulated time: {model.simulation_time}")
+
+
+@solara.component
 def score_component(model):
     solara.Markdown(
         f"## Score : {model.score:.2f}\n\n"
-        f"- **Prix du poisson** : {model.fish_price:.2f}\n"
-        f"- **Prix du carburant** : {model.fuel_price:.2f}\n"
-        f"- **Poissons déposés** : {model.total_fish_deposited}\n"
-        f"- **Prix remboursé** : {model.total_reimbursed_price:.2f}\n"
-        f"- **Carburant payé** : {model.total_fuel_paid:.2f}\n"
-        f"- **Bateaux servis** : {model.total_boats_serviced}"
+        "### Recettes\n\n"
+        "| Produit | Quantité vendue | Prix unitaire | Recette totale |\n"
+        "|---|---:|---:|---:|\n"
+        f"| Carburant | {model.total_fuel_refilled:.2f} | "
+        f"{model.fuel_price:.2f} € | {model.fuel_station_revenue:.2f} € |\n"
+        f"| Poisson | {model.total_fish_deposited} | "
+        f"{model.fish_price:.2f} € | {model.deposit_revenue:.2f} € |\n"
+        f"| **Total** | — | — | **{model.total_revenue:.2f} €** |\n\n"
+        "### Bilan du port\n\n"
+        "| Installation | Nombre | Coût total | Recette | Bénéfice |\n"
+        "|---|---:|---:|---:|---:|\n"
+        f"| Station carburant | {model.fuel_station_count} | "
+        f"{model.fuel_station_total_cost:,} € | "
+        f"{model.fuel_station_revenue:.2f} € | "
+        f"{model.fuel_station_profit:.2f} € |\n"
+        f"| Station dépôt | {model.deposit_station_count} | "
+        f"{model.deposit_station_total_cost:,} € | "
+        f"{model.deposit_revenue:.2f} € | "
+        f"{model.deposit_station_profit:.2f} € |\n"
+        f"| **Port au total** | 1 | **{model.total_cost:,} €** | "
+        f"**{model.total_revenue:.2f} €** | **{model.profit:.2f} €** |"
     )
 
 
@@ -140,7 +161,7 @@ model.add_boat(test_boat, spawn_pos)
 
 page = SolaraViz(
     model,
-    components=[score_component, space_component],
+    components=[time_component, score_component, space_component],
     model_params={"scenario": scenario, "demo_boat_fish": 20},
     name="Port Simulation",
 )
