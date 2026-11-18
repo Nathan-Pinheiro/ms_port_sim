@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 from collections import deque
 
@@ -12,23 +14,18 @@ from model.entities.boat import (
     DIRECTION_SOUTH,
     DIRECTION_WEST,
 )
+from model.map_io import fuse_tiles, load_map, load_port_config
 from model.pathfinding import generate_flow_field
 from model.scenario import Scenario
 from model.tiles.deposit_zone import DepositZone
 
 
 class World(Model):
-    """Grille de simulation du port.
+    """Port simulation.
 
-    Le terrain est une ``PropertyLayer`` dont les valeurs sont :
-
-    * ``0``  eau navigable
-    * ``1``  terre
-    * ``2``  station de dépôt
-    * ``3``  station carburant
-    * ``4``  case d'entrée / sortie (franchissable, comme l'eau)
-    * ``8``  eau adjacente à une station de dépôt
-    * ``18`` eau adjacente à une station carburant
+    Terrain values: ``0`` water, ``1`` earth, ``2`` deposit station,
+    ``3`` fuel station, ``4`` entry/exit, ``5`` artificial land,
+    ``8`` water next to a deposit and ``18`` water next to a fuel station.
     """
 
     fuel_threshold = 25.0
@@ -43,7 +40,6 @@ class World(Model):
     FUEL_ADJACENT = 18
     DEPOSIT_ADJACENT = 8
 
-    # Cellules sur lesquelles un bateau peut naviguer (empreinte complète).
     NAVIGABLE = frozenset({WATER, ENTRY_EXIT, FUEL_ADJACENT, DEPOSIT_ADJACENT})
     STEPS_PER_HOUR = 300
     SIMULATION_HOURS = 24
@@ -51,7 +47,11 @@ class World(Model):
     REVENUE_INTERVAL_MINUTES = 30
     STEPS_PER_REVENUE_INTERVAL = STEPS_PER_HOUR * REVENUE_INTERVAL_MINUTES // 60
 
-    def __init__(self, scenario: Scenario = Scenario(), demo_boat_fish: int | None = None):
+    def __init__(
+        self,
+        scenario: Scenario = Scenario(),
+        demo_boat_fish: int | None = None,
+    ):
         if scenario.scale < 1 or isinstance(scenario.scale, bool):
             raise ValueError("scenario.scale must be a positive integer")
         if scenario.fish_price < 0 or scenario.fuel_price < 0:
@@ -59,28 +59,43 @@ class World(Model):
 
         super().__init__(seed=scenario.seed)
 
-        # Paramètres du scénario
         self.ship_spawn_rate = scenario.ship_spawn_rate
         self.fish_amount = scenario.fish_amount
         self.fish_standard_deviation = scenario.fish_standard_deviation
-        self.map_scale = scenario.scale
         self.boat_scale = scenario.boat_scale
         self.fish_price = scenario.fish_price
         self.fuel_price = scenario.fuel_price
-        self.fuel_station_construction_cost = scenario.fuel_station_construction_cost
-        self.deposit_station_construction_cost = scenario.deposit_station_construction_cost
+        self.fuel_station_construction_cost = (
+            scenario.fuel_station_construction_cost
+        )
+        self.deposit_station_construction_cost = (
+            scenario.deposit_station_construction_cost
+        )
+        self.map_name = scenario.map_name
+        self.port_config_name = scenario.port_config_name
+
+        if scenario.area_tiles is not None and scenario.port_tiles is not None:
+            area_tiles = scenario.area_tiles
+            port_tiles = scenario.port_tiles
+        else:
+            area_tiles = load_map(scenario.map_name)["tiles"]
+            port_tiles = load_port_config(
+                scenario.map_name, scenario.port_config_name
+            )["tiles"]
+        fused_tiles = fuse_tiles(area_tiles, port_tiles)
+
         self.fuel_station_count = self._count_station_components(
-            scenario.tiles, self.FUEL_STATION
+            fused_tiles, self.FUEL_STATION
         )
         self.deposit_station_count = self._count_station_components(
-            scenario.tiles, self.DEPOSIT_STATION
+            fused_tiles, self.DEPOSIT_STATION
         )
         self.total_construction_cost = (
             self.fuel_station_count * self.fuel_station_construction_cost
-            + self.deposit_station_count * self.deposit_station_construction_cost
+            + self.deposit_station_count
+            * self.deposit_station_construction_cost
         )
 
-        # État / compteurs
         self.boats: list[Boat] = []
         self.score = 0.0
         self.total_fish_deposited = 0
@@ -88,18 +103,13 @@ class World(Model):
         self.total_fuel_refilled = 0.0
         self.total_fuel_paid = 0.0
         self.total_boats_serviced = 0
-        self.boats_teleported_to_deposit = 0
         self.boats_spawned = 0
-        # Revenus encaissés par intervalle de 30 minutes simulées.
         self.revenue_per_interval: list[float] = []
         self.current_interval_revenue = 0.0
         self._last_total_revenue = 0.0
-
-        # Champs de vecteurs (flow fields) utilises par le pathfinding
         self.flow_fields: dict = {}
 
-        # Construction de la grille
-        tiles = self._build_scaled_tiles(scenario.tiles, scenario.scale)
+        tiles = self._build_scaled_tiles(fused_tiles, scenario.scale)
         height = len(tiles)
         width = len(tiles[0])
         self.grid = SingleGrid(width, height, scenario.torus)
@@ -109,18 +119,17 @@ class World(Model):
 
         terrain_layer = self.grid.properties["terrain"]
         for row_idx, row in enumerate(tiles):
-            y = height - 1 - row_idx  # origine matplotlib en bas
+            y = height - 1 - row_idx
             for x, value in enumerate(row):
                 terrain_layer.set_cell((x, y), value)
 
         self.map_data = {
-            "width": scenario.width * scenario.scale,
-            "height": scenario.height * scenario.scale,
+            "width": width,
+            "height": height,
             "scale": scenario.scale,
             "tiles": tiles,
         }
 
-        # Toutes les cases d'entrée/sortie, déduites du terrain
         self.entry_exit_cells = [
             (x, y)
             for x in range(width)
@@ -129,13 +138,13 @@ class World(Model):
         ]
         if not self.entry_exit_cells:
             raise ValueError(
-                "Le terrain ne contient aucune case d'entrée/sortie "
-                f"(valeur {self.ENTRY_EXIT}). Vérifie PORTO_TILES."
+                "The map has no entry/exit cell "
+                f"(value {self.ENTRY_EXIT}). Check the map and its port "
+                "configuration."
             )
         self.boat_spawn_position = self.entry_exit_cells[0]
         self.deposit_stations = self._find_deposit_stations()
 
-        # L'agitation est fixe : calculee une fois au demarrage.
         self.agitation = self.compute_agitation()
         agitation_layer = PropertyLayer(
             "agitation", width, height, default_value=0.0, dtype=float
@@ -143,8 +152,7 @@ class World(Model):
         self.grid.add_property_layer(agitation_layer)
         for x in range(width):
             for y in range(height):
-                # NaN = pas de couleur d'agitation (terre/stations) : la case
-                # reste transparente au lieu de devenir claire.
+                # NaN keeps land and stations transparent instead of coloured.
                 value = (
                     self.agitation[x][y]
                     if terrain_layer.data[x][y] in self.NAVIGABLE
@@ -152,7 +160,6 @@ class World(Model):
                 )
                 agitation_layer.set_cell((x, y), value)
 
-        # Le champ de depot doit exister avant le premier pas de simulation.
         self.update_deposit_flow_field()
 
         if demo_boat_fish is not None:
@@ -161,20 +168,16 @@ class World(Model):
                 name="Demo boat",
                 speed=1,
                 capacity=max(50, demo_boat_fish),
-                fuel_consuption=1,
+                fuel_consumption=1,
                 fish=demo_boat_fish,
             )
             self.add_boat(demo_boat, self.boat_spawn_position)
-
-    # ------------------------------------------------------------------ #
-    # Construction du terrain
-    # ------------------------------------------------------------------ #
 
     @staticmethod
     def _count_station_components(
         tiles: tuple[tuple[int, ...], ...], station_value: int
     ) -> int:
-        """Compte les groupes de cases contiguës correspondant à une station."""
+        """Count connected groups of station cells."""
         station_cells = {
             (x, y)
             for y, row in enumerate(tiles)
@@ -184,9 +187,9 @@ class World(Model):
         count = 0
         while station_cells:
             count += 1
-            remaining = [station_cells.pop()]
-            while remaining:
-                x, y = remaining.pop()
+            pending = [station_cells.pop()]
+            while pending:
+                x, y = pending.pop()
                 for neighbor in (
                     (x - 1, y),
                     (x + 1, y),
@@ -195,14 +198,15 @@ class World(Model):
                 ):
                     if neighbor in station_cells:
                         station_cells.remove(neighbor)
-                        remaining.append(neighbor)
+                        pending.append(neighbor)
         return count
 
-    @staticmethod
-    def _build_scaled_tiles(source_tiles, map_scale):
+    def _build_scaled_tiles(self, source_tiles, map_scale: int):
         source_height = len(source_tiles)
         source_width = len(source_tiles[0])
-        if source_height == 0 or any(len(row) != source_width for row in source_tiles):
+        if source_height == 0 or any(
+            len(row) != source_width for row in source_tiles
+        ):
             raise ValueError("The map tiles must be a non-empty rectangular grid")
 
         expanded_tiles = []
@@ -213,45 +217,47 @@ class World(Model):
             for _ in range(map_scale):
                 expanded_tiles.append(expanded_row.copy())
 
-        # Cases d'eau adjacentes à une station : on les colore différemment
         height = len(expanded_tiles)
         width = len(expanded_tiles[0])
         for y, row in enumerate(expanded_tiles):
             for x, value in enumerate(row):
-                if value != 0:
+                if value != self.WATER:
                     continue
                 neighbors = [
                     expanded_tiles[ny][nx]
-                    for nx, ny in ((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1))
+                    for nx, ny in (
+                        (x - 1, y),
+                        (x + 1, y),
+                        (x, y - 1),
+                        (x, y + 1),
+                    )
                     if 0 <= nx < width
                     and 0 <= ny < height
-                    and expanded_tiles[ny][nx] in (2, 3)
+                    and expanded_tiles[ny][nx]
+                    in (self.DEPOSIT_STATION, self.FUEL_STATION)
                 ]
                 if neighbors:
-                    # 2 = depot -> acces 8 ; 3 = carburant -> acces 18
-                    row[x] = 8 if neighbors[0] == 2 else 18
+                    row[x] = (
+                        self.DEPOSIT_ADJACENT
+                        if neighbors[0] == self.DEPOSIT_STATION
+                        else self.FUEL_ADJACENT
+                    )
 
         return expanded_tiles
 
     def compute_agitation(self) -> list[list[float]]:
-        """Calcule l'agitation de l'eau (0.0 = calme, 1.0 = agité).
+        """Return water roughness, from ``0.0`` calm to ``1.0`` rough.
 
-        Méthode des « trajets opposés » : pour chaque case d'eau, on regarde la
-        direction du premier pas du plus court chemin vers chacune des cases de
-        large (les entrées/sorties de la carte). Dans un bassin enclos, tous ces
-        chemins sortent par le même chenal : les directions se ressemblent et
-        l'écart angulaire maximal reste faible, donc l'eau est calme. En eau
-        ouverte, les chemins vers des entrées opposées partent dans des
-        directions opposées : l'écart angulaire maximal est grand, donc l'eau
-        est agitée.
-
-        Le résultat est indexé ``agitation[x][y]``.
+        For each water cell, follow the first step of the shortest path to
+        every open-water cell. In a sheltered basin all paths leave through the
+        same channel, so their directions barely differ and the water is calm.
+        In open water paths to opposite exits point in opposite directions and
+        the water is rough. The result is indexed as ``agitation[x][y]``.
         """
         width = self.grid.width
         height = self.grid.height
         terrain = self.grid.properties["terrain"].data
 
-        # 8 directions, chacune associée à son angle.
         steps = [
             (1, 0),
             (1, 1),
@@ -281,7 +287,6 @@ class World(Model):
                 and terrain[x][y] in self.NAVIGABLE
             )
 
-        # Aplatit les cases navigables pour des parcours en largeur rapides.
         cells: list[tuple[int, int]] = []
         index: dict[tuple[int, int], int] = {}
         for y in range(height):
@@ -300,7 +305,6 @@ class World(Model):
                 if j is not None:
                     neighbours[i].append((j, direction))
 
-        # Cases de large : les entrées/sorties, sinon le bord navigable.
         open_ids = [
             index[(x, y)]
             for x in range(width)
@@ -314,12 +318,11 @@ class World(Model):
                 if x in (0, width - 1) or y in (0, height - 1)
             ]
 
-        # Un sous-échantillon régulier suffit : des entrées voisines donnent des
-        # directions quasi identiques. Cela garde le calcul rapide au démarrage.
+        # Neighbouring exits yield nearly identical directions, so sampling a
+        # regular subset keeps start-up fast without changing the result much.
         stride = max(1, len(open_ids) // 150)
         open_ids = open_ids[::stride]
 
-        # Pour chaque case, masque binaire des directions de sortie observées.
         out_dirs = [0] * count
         distance = [-1] * count
 
@@ -336,7 +339,6 @@ class World(Model):
                         distance[neighbour] = next_distance
                         queue.append(neighbour)
 
-            # Direction du premier pas vers cette entrée.
             for i in range(count):
                 dist = distance[i]
                 if dist <= 0:
@@ -349,13 +351,11 @@ class World(Model):
         agitation = [[0.0] * height for _ in range(width)]
         for i, (x, y) in enumerate(cells):
             if terrain[x][y] == self.ENTRY_EXIT:
-                # Le large lui-même est toujours agité.
                 agitation[x][y] = 1.0
                 continue
 
             directions = [d for d in range(8) if out_dirs[i] >> d & 1]
             if len(directions) < 2:
-                # Une seule direction de sortie : l'eau est enfermée, calme.
                 agitation[x][y] = 0.0
                 continue
 
@@ -370,14 +370,14 @@ class World(Model):
         return agitation
 
     def is_cell_walkable(self, x: int, y: int) -> bool:
-        """Indique si la case ``(x, y)`` est navigable (independamment d'un bateau)."""
+        """Return whether ``(x, y)`` is navigable water."""
         if self.grid.out_of_bounds((x, y)):
             return False
         terrain = self.grid.properties["terrain"].data[x][y]
         return terrain in self.NAVIGABLE
 
     def get_available_deposit_positions(self) -> list[tuple[int, int]]:
-        """Cases de service des stations libres, ou de toutes si elles sont prises."""
+        """Service cells of free stations, or of every station if all are busy."""
         available = [
             position
             for station in self.deposit_stations
@@ -394,7 +394,7 @@ class World(Model):
         ]
 
     def _find_deposit_stations(self) -> list[DepositZone]:
-        """Construit une station par composante de cases de dépôt connectées."""
+        """Build one station per connected group of deposit cells."""
         terrain = self.grid.properties["terrain"].data
         remaining = {
             (x, y)
@@ -492,7 +492,9 @@ class World(Model):
             list[tuple[tuple[int, int], int]],
         ] = {}
 
-        def path_to(position: tuple[int, int]) -> list[tuple[tuple[int, int], int]]:
+        def path_to(
+            position: tuple[int, int],
+        ) -> list[tuple[tuple[int, int], int]]:
             path = []
             current = position
             while current != start:
@@ -513,8 +515,14 @@ class World(Model):
         while pending:
             current = pending.popleft()
             for dx, dy in (
-                (-1, 0), (1, 0), (0, -1), (0, 1),
-                (-1, -1), (-1, 1), (1, -1), (1, 1),
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (-1, 1),
+                (1, -1),
+                (1, 1),
             ):
                 neighbor = (current[0] + dx, current[1] + dy)
                 direction = Boat._direction_from_delta(dx, dy)
@@ -639,7 +647,7 @@ class World(Model):
             self.flow_fields.pop(boat.flow_field_key, None)
 
     def update_deposit_flow_field(self) -> None:
-        """Recalcule le flow field vers les acces de depot disponibles."""
+        """Rebuild the flow field toward the available deposit access cells."""
         targets = self.get_available_deposit_positions()
         if targets:
             self.flow_fields["deposit"] = generate_flow_field(
@@ -650,12 +658,8 @@ class World(Model):
         else:
             self.flow_fields["deposit"] = {}
 
-    # ------------------------------------------------------------------ #
-    # Apparition des bateaux
-    # ------------------------------------------------------------------ #
-
     def _find_spawn_placement(self, boat: Boat) -> tuple[int, int] | None:
-        """Trouve une case d'entree libre ou l'empreinte du bateau peut tenir."""
+        """Return a free entry cell where the boat footprint fits."""
         placements: list[tuple[tuple[int, int], int]] = []
         for position in self.entry_exit_cells:
             for direction in (
@@ -679,12 +683,8 @@ class World(Model):
         return position
 
     def spawn_boats(self) -> list[Boat]:
-        """Fait apparaitre un bateau aleatoire sur une entree libre.
-
-        ``ship_spawn_rate`` est la probabilite de spawn par pas de simulation.
-        Le poisson embarque suit une loi normale
-        ``(fish_amount, fish_standard_deviation)``, bornee a zero.
-        """
+        """Spawn one random boat on a free entry cell with probability
+        ``ship_spawn_rate``; its fish follow a normal distribution."""
         if self.ship_spawn_rate <= 0:
             return []
         if self.random.random() >= self.ship_spawn_rate:
@@ -705,7 +705,7 @@ class World(Model):
             name=f"Boat {self.boats_spawned + 1}",
             speed=1,
             capacity=max(fish, self.fish_amount, 1),
-            fuel_consuption=1,
+            fuel_consumption=1,
             fish=fish,
         )
 
@@ -717,12 +717,8 @@ class World(Model):
         self.boats_spawned += 1
         return [boat]
 
-    # ------------------------------------------------------------------ #
-    # Boucle de simulation
-    # ------------------------------------------------------------------ #
-
     def step(self):
-        """Fait apparaitre de nouveaux bateaux puis traite deplacements et services."""
+        """Spawn boats, then move and service them."""
         self.spawn_boats()
 
         for boat in list(self.boats):
@@ -764,9 +760,11 @@ class World(Model):
             self.running = False
 
     def _record_revenue(self) -> None:
-        """Accumule les revenus et clôt un intervalle toutes les 30 minutes."""
+        """Close a 30-minute revenue interval when the step count reaches it."""
         current_total = self.total_revenue
-        self.current_interval_revenue += current_total - self._last_total_revenue
+        self.current_interval_revenue += (
+            current_total - self._last_total_revenue
+        )
         self._last_total_revenue = current_total
         if (self.steps + 1) % self.STEPS_PER_REVENUE_INTERVAL == 0:
             self.revenue_per_interval.append(self.current_interval_revenue)
@@ -774,103 +772,89 @@ class World(Model):
 
     @property
     def simulation_time(self) -> str:
-        """Return the simulated time in 12-hour format."""
+        """Simulated time in 12-hour format."""
         total_minutes = self.steps * 60 // self.STEPS_PER_HOUR
         hours_24, minutes = divmod(total_minutes, 60)
         hours_12 = 0 if hours_24 == self.SIMULATION_HOURS else (
             hours_24 if hours_24 <= 12 else hours_24 - 12
         )
-        period = "am" if hours_24 < 12 or hours_24 == self.SIMULATION_HOURS else "pm"
+        period = (
+            "am"
+            if hours_24 < 12 or hours_24 == self.SIMULATION_HOURS
+            else "pm"
+        )
         return f"{hours_12}:{minutes:02d}{period}"
 
     @property
     def deposit_revenue(self) -> float:
-        """Return the deposit station revenue from deposited fish."""
         return self.total_fish_deposited * self.fish_price
 
     @property
     def fuel_station_revenue(self) -> float:
-        """Return the fuel station revenue from fuel sold."""
         return self.total_fuel_refilled * self.fuel_price
 
     @property
     def total_revenue(self) -> float:
-        """Return the total revenue generated by the stations."""
         return self.deposit_revenue + self.fuel_station_revenue
 
     @property
     def total_cost(self) -> float:
-        """Return the total construction cost of the port."""
         return self.total_construction_cost
 
     @property
     def fuel_station_total_cost(self) -> float:
-        """Return the construction cost of all fuel stations."""
         return self.fuel_station_count * self.fuel_station_construction_cost
 
     @property
     def deposit_station_total_cost(self) -> float:
-        """Return the construction cost of all deposit stations."""
-        return self.deposit_station_count * self.deposit_station_construction_cost
+        return (
+            self.deposit_station_count
+            * self.deposit_station_construction_cost
+        )
 
     @property
     def fuel_station_profit(self) -> float:
-        """Return fuel station revenue minus construction cost."""
         return self.fuel_station_revenue - self.fuel_station_total_cost
 
     @property
     def deposit_station_profit(self) -> float:
-        """Return deposit station revenue minus construction cost."""
         return self.deposit_revenue - self.deposit_station_total_cost
 
     @property
     def profit(self) -> float:
-        """Return total station revenue minus total construction cost."""
         return self.total_revenue - self.total_cost
 
     @property
     def elapsed_hours(self) -> float:
-        """Temps de simulation écoulé, en heures (fractionnaire)."""
         return self.steps / self.STEPS_PER_HOUR
 
     @property
     def revenue_per_hour(self) -> float:
-        """Recette moyenne par heure simulée depuis le début."""
         if self.elapsed_hours <= 0:
             return 0.0
         return self.total_revenue / self.elapsed_hours
 
     @property
     def estimated_daily_revenue(self) -> float:
-        """Recette journalière estimée à partir de la moyenne horaire.
-
-        Tant que peu de temps s'est écoulé, l'estimation est brute (la recette
-        de la première heure est multipliée par 24) puis elle s'affine au fur
-        et à mesure que la moyenne porte sur plus d'heures.
-        """
         return self.revenue_per_hour * 24
 
     @property
     def estimated_annual_revenue(self) -> float:
-        """Recette annuelle estimée (365 jours)."""
         return self.estimated_daily_revenue * 365
 
     @property
     def estimated_break_even_days(self) -> float | None:
-        """Nombre de jours estimés pour rentabiliser tout le port."""
         if self.estimated_daily_revenue <= 0:
             return None
         return self.total_cost / self.estimated_daily_revenue
 
     @property
     def estimated_break_even_years(self) -> float | None:
-        """Nombre d'années estimées pour rentabiliser tout le port."""
         days = self.estimated_break_even_days
         return None if days is None else days / 365
 
     @property
     def estimated_days_remaining(self) -> float | None:
-        """Jours restants estimés avant le seuil de rentabilité."""
         if self.estimated_daily_revenue <= 0:
             return None
         remaining = max(0.0, self.total_cost - self.total_revenue)
@@ -878,33 +862,31 @@ class World(Model):
 
     @property
     def estimated_annual_roi(self) -> float | None:
-        """Rentabilité annuelle estimée (recette annuelle / coût du port)."""
         if self.total_cost <= 0 or self.elapsed_hours <= 0:
             return None
         return self.estimated_annual_revenue / self.total_cost
 
     def service_boat(self, boat: Boat) -> bool:
-        """Dépose le poisson et remplit le carburant si le bateau touche une zone."""
+        """Unload fish and refill fuel when the boat touches a service zone."""
         if boat.position is None:
             return False
 
         x, y = boat.position
         agitation = self.agitation[x][y]
-
-        # Efficacité de 1.0 (eau calme) à 0.2 (eau très agitée).
         efficiency = max(0.2, 1.0 - agitation * 0.8)
 
         serviced = False
         zones = self.zones_at_position(boat.position)
 
         station = boat.deposit_station
+        # Waiting boats also drive to a berth, so any boat that reached its
+        # assigned cell may unload. Refusing them would park them there and
+        # block the active boat forever.
         is_at_assigned_station = (
             station is not None
-            and station.active_boat is boat
             and boat.position == boat.navigation_target
         )
         if "deposit" in zones and boat.fish > 0 and is_at_assigned_station:
-            # En eau agitée, le poisson peut être baladé et le dépôt échoue.
             if self.random.random() < efficiency:
                 unloaded = min(boat.fish, self.FISH_UNLOAD_PER_STEP)
                 boat.fish -= unloaded
@@ -927,10 +909,6 @@ class World(Model):
             self.total_boats_serviced += 1
         return serviced
 
-    # ------------------------------------------------------------------ #
-    # Placement et déplacement
-    # ------------------------------------------------------------------ #
-
     def can_place_boat(
         self,
         boat: Boat,
@@ -938,20 +916,13 @@ class World(Model):
         *,
         allow_access: bool = False,
     ) -> bool:
-        """Indique si l'empreinte du bateau tient à ``position``.
-
-        Chaque cellule de l'empreinte doit être :
-
-        * dans la grille (un bateau ne sort jamais de l'écran),
-        * sur une case navigable : eau (``0``), entrée/sortie (``4``),
-          ou eau adjacente à une station (``8`` / ``18``).
-
-        ``allow_access`` autorise en plus la cellule ``deposit_access_position``,
-        utilisée uniquement lors du placement initial du bateau de démo.
-        """
+        """Return whether the whole boat footprint fits on navigable cells."""
         terrain_layer = self.grid.properties["terrain"].data
         for cell_x, cell_y in boat.occupied_cells(position):
-            if not (0 <= cell_x < self.grid.width and 0 <= cell_y < self.grid.height):
+            if not (
+                0 <= cell_x < self.grid.width
+                and 0 <= cell_y < self.grid.height
+            ):
                 return False
             if terrain_layer[cell_x][cell_y] in self.NAVIGABLE:
                 continue
@@ -967,7 +938,7 @@ class World(Model):
         *,
         allow_access: bool = False,
     ) -> bool:
-        """Vérifie le terrain et les empreintes des bateaux déjà présents."""
+        """Check both the terrain and the footprints of other boats."""
         if not self.can_place_boat(boat, position, allow_access=allow_access):
             return False
 
@@ -979,34 +950,14 @@ class World(Model):
                 return False
         return True
 
-    def turn_boat(self, boat: Boat, direction: int) -> bool:
-        """Tourne le bateau sans le déplacer.
-
-        Le changement est annulé (retourne ``False``) si la nouvelle empreinte
-        ne tient pas à la position courante.
-        """
-        if boat.position is None:
-            return False
-
-        previous = boat.direction
-        boat.direction = int(direction) % 4
-        if not self.can_place_boat(boat, boat.position):
-            boat.direction = previous
-            return False
-        return True
-
-    def _move_boat(
+    def move_boat(
         self,
         boat: Boat,
         dx: int,
         dy: int,
         direction: int | None = None,
     ) -> bool:
-        """Déplace le bateau en validant toute son empreinte.
-
-        Si ``direction`` est fourni, le bateau s'oriente d'abord dans cette
-        direction : orientation et déplacement sont atomiques.
-        """
+        """Move the boat if its whole footprint fits; rotation is atomic."""
         position = boat.position
         if position is None:
             return False
@@ -1023,24 +974,8 @@ class World(Model):
         self.grid.move_agent(boat, target)
         return True
 
-    def move_boat(self, boat: Boat, dx: int, dy: int) -> bool:
-        """Déplace le bateau de ``(dx, dy)`` sans changer son orientation."""
-        return self._move_boat(boat, dx, dy)
-
-    def move_boat_north(self, boat: Boat) -> bool:
-        return self._move_boat(boat, 0, 1, direction=DIRECTION_NORTH)
-
-    def move_boat_south(self, boat: Boat) -> bool:
-        return self._move_boat(boat, 0, -1, direction=DIRECTION_SOUTH)
-
-    def move_boat_east(self, boat: Boat) -> bool:
-        return self._move_boat(boat, 1, 0, direction=DIRECTION_EAST)
-
-    def move_boat_west(self, boat: Boat) -> bool:
-        return self._move_boat(boat, -1, 0, direction=DIRECTION_WEST)
-
     def add_boat(self, boat: Boat, position: tuple[int, int]) -> Boat:
-        """Ajoute un bateau immobile sur une case navigable."""
+        """Place a boat on a free navigable cell."""
         if not isinstance(boat, Boat):
             raise TypeError("boat must be a Boat")
         if not self.can_place_boat(
@@ -1058,21 +993,10 @@ class World(Model):
             self.boats.append(boat)
         return boat
 
-    # ------------------------------------------------------------------ #
-    # Zones de service
-    # ------------------------------------------------------------------ #
-
-    def nearby_zones(self, position: tuple[int, int]) -> set[str]:
-        """Zones de service adjacentes à ``position`` (exclut la case elle-même)."""
-        return self._zones_at(position, include_position=False)
-
     def zones_at_position(self, position: tuple[int, int]) -> set[str]:
-        """Zones de service occupées par ou adjacentes à ``position``."""
-        return self._zones_at(position, include_position=True)
-
-    def _zones_at(self, position: tuple[int, int], include_position: bool) -> set[str]:
+        """Service zones occupied by or adjacent to ``position``."""
         x, y = position
-        positions = [(x, y)] if include_position else []
+        positions = [(x, y)]
         positions.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
 
         zones: set[str] = set()

@@ -1,1 +1,0 @@
-solara run src/main.py

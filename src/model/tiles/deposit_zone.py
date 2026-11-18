@@ -23,7 +23,7 @@ class DepositZone(Agent):
         self.is_occupied: bool = False
 
     def occupy(self, boat: Boat | None = None) -> None:
-        """Marque la station comme occupée et met à jour les chemins."""
+        """Mark the station busy and refresh its flow field."""
         if boat is not None:
             self.active_boat = boat
         if not self.is_occupied:
@@ -32,7 +32,7 @@ class DepositZone(Agent):
                 self.model.update_deposit_flow_field()
 
     def release(self, boat: Boat | None = None) -> None:
-        """Libère la station et redirige les bateaux vers celle-ci."""
+        """Free the station and redirect boats toward it."""
         if boat is None or self.active_boat is boat:
             self.active_boat = None
         if self.is_occupied and self.active_boat is None:

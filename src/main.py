@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import solara
 from matplotlib.figure import Figure
 from mesa.visualization.components import PropertyLayerStyle
@@ -5,15 +7,19 @@ from mesa.visualization.mpl_space_drawing import draw_property_layers
 from mesa.visualization.solara_viz import ModelController, ShowSteps
 from mesa.visualization.utils import update_counter
 
+from model import map_io
 from model.entities.boat import Boat
 from model.model import World
 from model.scenario import Scenario
 from model.visualization.boat_portrayal import draw_boats
 
 water_color = "#1f77b4"
+earth_color = "#8fbc8f"
+artificial_land_color = "#9e9e6b"
 deposit_color = "#BFBFBF"
 fuel_color = "#8F786D"
 entry_exit_color = "#1f77b4"
+
 
 def blend_colors(start: str, end: str, amount: float) -> str:
     start_rgb = tuple(int(start[i : i + 2], 16) for i in (1, 3, 5))
@@ -24,12 +30,26 @@ def blend_colors(start: str, end: str, amount: float) -> str:
     ]
     return "#{:02x}{:02x}{:02x}".format(*blended)
 
-colors = [water_color, "#8fbc8f", deposit_color, fuel_color, entry_exit_color]
-for station_color in (deposit_color, fuel_color):
-    for band in range(1, 11):
-        colors.append(blend_colors(water_color, station_color, band / 10))
+
+# Indexed by terrain value: 0 water, 1 earth, 2 deposit, 3 fuel, 4 entry/exit,
+# 5 artificial land, 8 deposit access and 18 fuel access.
+colors = [
+    water_color,
+    earth_color,
+    deposit_color,
+    fuel_color,
+    entry_exit_color,
+    artificial_land_color,
+    water_color,
+    water_color,
+    blend_colors(water_color, deposit_color, 0.45),
+]
+colors += [water_color] * 9
+colors.append(blend_colors(water_color, fuel_color, 0.45))
+colors += [water_color] * 6
 
 agitation_colors = ["#1f77b4", "#0B66AC"]
+
 
 def propertylayer_portrayal(layer):
     if layer.name == "terrain":
@@ -41,9 +61,7 @@ def propertylayer_portrayal(layer):
             colorbar=False,
         )
     if layer.name == "agitation":
-        # Calm = shallow-sea blue, rough = very dark blue.
-        # vmin > 0 is intentional: non-navigable cells are NaN and must stay
-        # transparent (otherwise Mesa computes np.min(data) = NaN).
+        # vmin > 0 keeps NaN cells (land and stations) transparent.
         return PropertyLayerStyle(
             colormap=agitation_colors,
             alpha=0.85,
@@ -56,12 +74,7 @@ def propertylayer_portrayal(layer):
 
 @solara.component
 def space_component(model):
-    """Terrain (property layer) + vector boats.
-
-    Boats intentionally bypass ``make_space_component``: Mesa would draw them
-    as image markers without dynamic tint or cell-sized footprints.
-    ``draw_boats`` renders them here as vectors on top of the terrain.
-    """
+    """Terrain, then vector boats on top of it."""
     update_counter.get()
 
     space = model.grid
@@ -90,7 +103,7 @@ def revenue_curve_component(model):
     update_counter.get()
 
     values = model.revenue_per_interval
-    fig = Figure(figsize=(4.2, 2.8))
+    fig = Figure(figsize=(3.6, 2.6))
     ax = fig.add_subplot()
 
     if values:
@@ -160,7 +173,7 @@ def costs_component(model):
     """Fixed prices of the paid tiles."""
     update_counter.get()
     solara.Markdown(
-        "| Item | Count | Unit price | Total |\n"
+        "| Item | Count | Unit | Total |\n"
         "|---|---:|---:|---:|\n"
         f"| Fuel station | {model.fuel_station_count} | "
         f"{model.fuel_station_construction_cost:,} € | "
@@ -177,7 +190,7 @@ def revenues_component(model):
     """Revenue detail by product, based on unit prices."""
     update_counter.get()
     solara.Markdown(
-        "| Product | Quantity sold | Unit price | Total revenue |\n"
+        "| Product | Qty sold | Unit price | Revenue |\n"
         "|---|---:|---:|---:|\n"
         f"| Fuel | {model.total_fuel_refilled:.2f} | "
         f"{model.fuel_price:.2f} € | {model.fuel_station_revenue:.2f} € |\n"
@@ -198,44 +211,114 @@ def prices_component(model):
             revenues_component(model)
 
 
-scenario = Scenario(
-    ship_spawn_rate=0.04,
-    fish_amount=50,
-    fish_standard_deviation=5.0,
-    fish_price=10.0,
-    fuel_price=2.0,
-    seed=42,
-)
+def build_model(scenario: Scenario) -> World:
+    """Create a world and place the pathfinding demo boat on free water."""
+    world = World(scenario, demo_boat_fish=None)
+    test_boat = Boat(
+        size=3,
+        name="Test Boat Pathfinding",
+        speed=1,
+        capacity=50,
+        fuel_consumption=1,
+        fish=30,
+    )
+    for y in range(1, world.grid.height):
+        for x in range(1, world.grid.width):
+            position = (x, y)
+            if world.can_place_boat(test_boat, position):
+                world.add_boat(test_boat, position)
+                return world
+    return world
 
-initial_model = World(scenario, demo_boat_fish=None)
 
-# Pathfinding demo boat: large boat (3x2) that reaches the deposit station by
-# following the flow field.
-test_boat = Boat(
-    size=3,
-    name="Test Boat Pathfinding",
-    speed=1,
-    capacity=50,
-    fuel_consuption=1,
-    fish=30,
-)
-initial_model.add_boat(test_boat, (1, 1))
+def make_scenario(map_name: str, config_name: str) -> Scenario:
+    return Scenario(
+        map_name=map_name,
+        port_config_name=config_name,
+        ship_spawn_rate=0.04,
+        fish_amount=50,
+        fish_standard_deviation=5.0,
+        fish_price=10.0,
+        fuel_price=2.0,
+        seed=42,
+    )
+
+
+_available_maps = map_io.list_maps()
+_initial_map = _available_maps[0] if _available_maps else "matosinhos"
+_available_configs = map_io.list_port_configs(_initial_map)
+_initial_config = _available_configs[0] if _available_configs else "default"
+initial_scenario = make_scenario(_initial_map, _initial_config)
+initial_model = build_model(initial_scenario)
 
 
 @solara.component
 def Page():
     model = solara.use_reactive(initial_model)
-    model_parameters = solara.use_reactive({})
+    model_parameters = solara.use_reactive({"scenario": initial_scenario})
     play_interval = solara.use_reactive(100)
     render_interval = solara.use_reactive(1)
     use_threads = solara.use_reactive(False)
+
+    maps = map_io.list_maps()
+    selected_map = solara.use_reactive(model.value.map_name)
+    selected_config = solara.use_reactive(model.value.port_config_name)
+    configs = map_io.list_port_configs(selected_map.value)
+    port_message = solara.use_reactive("")
+
+    def on_map_change(name: str) -> None:
+        selected_map.set(name)
+        available = map_io.list_port_configs(name)
+        selected_config.set(available[0] if available else "")
+
+    def load_selected() -> None:
+        if not selected_map.value or not selected_config.value:
+            port_message.set("Choose a map and a port configuration first.")
+            return
+        scenario = make_scenario(selected_map.value, selected_config.value)
+        try:
+            new_model = build_model(scenario)
+        except (map_io.MapError, ValueError) as exc:
+            port_message.set(str(exc))
+            return
+        model_parameters.set({"scenario": scenario})
+        model.set(new_model)
+        port_message.set(
+            f"Loaded {selected_map.value} / {selected_config.value}"
+        )
 
     with solara.AppBar():
         solara.AppBarTitle("Port Simulation")
         solara.lab.ThemeToggle()
 
     # Everything except the map lives in the left sidebar.
-    with solara.Sidebar(), solara.Column():
+    with solara.Sidebar(), solara.Column(
+        style={"width": "310px", "overflowX": "auto"}
+    ):
+        with solara.Card("Port"):
+            solara.Select(
+                label="Area map",
+                values=maps,
+                value=selected_map.value,
+                on_value=on_map_change,
+            )
+            solara.Select(
+                label="Port configuration",
+                values=configs,
+                value=(
+                    selected_config.value
+                    if selected_config.value in configs
+                    else None
+                ),
+                on_value=selected_config.set,
+            )
+            solara.Button("Load map / configuration", on_click=load_selected)
+            solara.Markdown(
+                f"**Loaded:** {model.value.map_name} / "
+                f"{model.value.port_config_name}"
+            )
+            if port_message.value:
+                solara.Markdown(f"_{port_message.value}_")
         with solara.Card("Controls"):
             solara.SliderInt(
                 label="Play Interval (ms)",
@@ -283,7 +366,7 @@ def Page():
             space_component(model.value)
         with solara.Column(
             style={
-                "width": "360px",
+                "width": "250px",
                 "flexShrink": "0",
                 "padding": "8px",
             }

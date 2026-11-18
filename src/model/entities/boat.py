@@ -9,29 +9,22 @@ if TYPE_CHECKING:
     from model.tiles.deposit_zone import DepositZone
 
 
-# Empreinte de base (longueur, largeur) en cellules pour chaque taille.
-#
-# * ``longueur`` est l'axe proue-poupe lorsque le bateau pointe vers l'Est,
-#   c'est-a-dire l'orientation de base des fichiers SVG.
-# * ``largeur`` est l'axe perpendiculaire (le travers).
-#
-# C'est la seule source de verite pour la geometrie des bateaux : le rendu
-# (boat_portrayal) et les deplacements (World) l'utilisent tous les deux.
+# Size -> (length along the bow, beam). Length is horizontal when facing east,
+# which is the orientation of the SVG assets.
 BOAT_FOOTPRINTS: dict[int, tuple[int, int]] = {
-    1: (1, 1),  # petit 1x1
-    2: (2, 1),  # moyen 2x1
-    3: (3, 2),  # grand 3x2
+    1: (1, 1),
+    2: (2, 1),
+    3: (3, 2),
 }
 
 DEFAULT_BOAT_SIZE = 1
 
-# Directions : 0=Nord (haut), 1=Est (droite), 2=Sud (bas), 3=Ouest (gauche).
+# 0 = north, 1 = east, 2 = south, 3 = west.
 DIRECTION_NORTH = 0
 DIRECTION_EAST = 1
 DIRECTION_SOUTH = 2
 DIRECTION_WEST = 3
 
-# Directions pour lesquelles la longueur du bateau est verticale.
 VERTICAL_DIRECTIONS = (DIRECTION_NORTH, DIRECTION_SOUTH)
 
 
@@ -42,7 +35,7 @@ class Boat(Agent):
         name: str,
         speed: float,
         capacity: int,
-        fuel_consuption: float,
+        fuel_consumption: float,
         fuel_capacity: float = 100.0,
         initial_fuel: float | None = None,
         fish: int = 0,
@@ -61,8 +54,7 @@ class Boat(Agent):
         self.name: str = name
         self.speed: float = speed
         self.capacity: int = capacity
-        self.fuel_consuption: float = fuel_consuption
-        self.fuel_consumption: float = fuel_consuption
+        self.fuel_consumption: float = fuel_consumption
         self.fuel_capacity: float = fuel_capacity
         self.fuel: float = (
             fuel_capacity if initial_fuel is None else initial_fuel
@@ -74,7 +66,7 @@ class Boat(Agent):
             raise ValueError("fish must be between zero and capacity")
 
         self.boat_type: str = boat_type
-        self.direction: int = int(direction) % 4  # 0=N, 1=E, 2=S, 3=W
+        self.direction: int = int(direction) % 4
         self.deposit_station: DepositZone | None = None
         self.deposit_status = "arriving"
         self.navigation_target: tuple[int, int] | None = None
@@ -83,13 +75,8 @@ class Boat(Agent):
         self.exit_directions: dict[tuple[int, int], int] = {}
         self.flow_field_key: object | None = None
 
-    # ------------------------------------------------------------------
-    # Empreinte / orientation
-    # ------------------------------------------------------------------
-
     @property
     def size_key(self) -> int:
-        """Taille normalisee (1, 2 ou 3), tolerant les valeurs flottantes."""
         try:
             key = int(round(float(self.size)))
         except (TypeError, ValueError):
@@ -98,28 +85,20 @@ class Boat(Agent):
 
     @property
     def heading(self) -> int:
-        """Direction normalisee dans [0, 3]."""
         return int(self.direction) % 4
 
     @property
     def footprint(self) -> tuple[int, int]:
-        """Empreinte (largeur, hauteur) en cellules selon l'orientation.
-
-        La largeur est l'axe horizontal (x) et la hauteur l'axe vertical (y).
-        Un bateau 2x1 oriente au Nord occupe donc 1 cellule en largeur et
-        2 en hauteur.
-        """
+        """Footprint as ``(width, height)`` in cells for the current heading."""
         length, beam = BOAT_FOOTPRINTS[self.size_key]
         if self.heading in VERTICAL_DIRECTIONS:
             return beam, length
         return length, beam
 
-    def occupied_cells(self, position: tuple[int, int] | None = None) -> list[tuple[int, int]]:
-        """Cellules occupees par le bateau dont le coin bas-gauche est ``position``.
-
-        Par defaut, utilise la position courante de l'agent. La position de
-        l'agent represente toujours le coin bas-gauche de son empreinte.
-        """
+    def occupied_cells(
+        self, position: tuple[int, int] | None = None
+    ) -> list[tuple[int, int]]:
+        """Cells covered by the boat, anchored at its bottom-left corner."""
         if position is None:
             position = self.position
         if position is None:
@@ -132,18 +111,6 @@ class Boat(Agent):
             for dx in range(width)
             for dy in range(height)
         ]
-
-    # ------------------------------------------------------------------
-    # Etat
-    # ------------------------------------------------------------------
-
-    @property
-    def fish_amount(self) -> int:
-        return self.fish
-
-    @property
-    def fuel_level(self) -> float:
-        return self.fuel
 
     @property
     def position(self) -> tuple[int, int] | None:
@@ -162,17 +129,17 @@ class Boat(Agent):
             if isinstance(neighbor, Boat) and neighbor != self:
                 dx = self.pos[0] - neighbor.pos[0]
                 dy = self.pos[1] - neighbor.pos[1]
-                dist = math.hypot(dx, dy)
-                if dist > 0:
-                    weight = 1.0 / (dist**2)
-                    avoid_x += (dx / dist) * weight
-                    avoid_y += (dy / dist) * weight
+                distance = math.hypot(dx, dy)
+                if distance > 0:
+                    weight = 1.0 / (distance**2)
+                    avoid_x += (dx / distance) * weight
+                    avoid_y += (dy / distance) * weight
 
         return (avoid_x, avoid_y)
 
     @staticmethod
     def _direction_from_delta(dx: int, dy: int) -> int:
-        """Direction cardinale dominante d'un deplacement ``(dx, dy)``."""
+        """Dominant cardinal direction of a ``(dx, dy)`` move."""
         if abs(dx) >= abs(dy):
             return DIRECTION_EAST if dx > 0 else DIRECTION_WEST
         return DIRECTION_NORTH if dy > 0 else DIRECTION_SOUTH
@@ -203,8 +170,7 @@ class Boat(Agent):
             if length == 0:
                 continue
 
-            # Un grand bateau doit pouvoir tourner pour emprunter la case :
-            # on valide l'empreinte dans la direction du deplacement.
+            # Large boats need a valid footprint in the direction of travel.
             direction = self._direction_from_delta(dir_x, dir_y)
             if (
                 stop_if_blocked
@@ -221,7 +187,9 @@ class Boat(Agent):
             ):
                 continue
 
-            dot_product = ((dir_x / length) * target_dx) + ((dir_y / length) * target_dy)
+            dot_product = ((dir_x / length) * target_dx) + (
+                (dir_y / length) * target_dy
+            )
             if dot_product > best_score:
                 best_score = dot_product
                 best_pos = (nx, ny)
@@ -260,8 +228,6 @@ class Boat(Agent):
                 and self.pos == self.navigation_target
             ):
                 return
-            # Compatibilite avec les bateaux qui n'ont pas encore ete affectes
-            # a une station.
             if (
                 self.navigation_target is None
                 and current_terrain == self.model.DEPOSIT_ADJACENT
@@ -282,12 +248,13 @@ class Boat(Agent):
 
                 dx = next_pos[0] - self.pos[0]
                 dy = next_pos[1] - self.pos[1]
-                if self.model._move_boat(self, dx, dy, direction=direction):
+                if self.model.move_boat(self, dx, dy, direction=direction):
                     self.navigation_path.pop(0)
-                    self.fuel = max(0.0, self.fuel - self.fuel_consumption)
+                    self.fuel = max(
+                        0.0, self.fuel - self.fuel_consumption
+                    )
                 return
         elif target_key == "fuel":
-            # 18 = eau adjacente a une station carburant
             if (
                 current_terrain == self.model.FUEL_ADJACENT
                 and self.fuel < self.fuel_capacity
@@ -297,7 +264,8 @@ class Boat(Agent):
         flow_fields = getattr(self.model, "flow_fields", {})
         field_key = (
             self.flow_field_key
-            if target_key in ("deposit", "exit") and self.flow_field_key is not None
+            if target_key in ("deposit", "exit")
+            and self.flow_field_key is not None
             else target_key
         )
         flow_field = flow_fields.get(field_key, {})
@@ -332,7 +300,7 @@ class Boat(Agent):
                 direction = self.navigation_direction
             else:
                 direction = self._direction_from_delta(dx, dy)
-            if self.model._move_boat(self, dx, dy, direction=direction):
+            if self.model.move_boat(self, dx, dy, direction=direction):
                 self.fuel = max(0.0, self.fuel - self.fuel_consumption)
 
     def step(self) -> None:
