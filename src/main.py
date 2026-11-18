@@ -199,7 +199,7 @@ def prices_component(model):
 
 
 scenario = Scenario(
-    ship_spawn_rate=0.1,
+    ship_spawn_rate=0.04,
     fish_amount=50,
     fish_standard_deviation=5.0,
     fish_price=10.0,
