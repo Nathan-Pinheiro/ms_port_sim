@@ -8,10 +8,10 @@ from mesa.visualization.solara_viz import ModelController, ShowSteps
 from mesa.visualization.utils import update_counter
 
 from model import map_io
-from model.entities.boat import Boat
+from model.entities.boat import BOAT_TYPES, BOAT_TYPE_SIZES, Boat
 from model.model import World
 from model.scenario import Scenario
-from model.visualization.boat_portrayal import draw_boats
+from model.visualization.boat_portrayal import TYPE_COLORS, draw_boats
 
 water_color = "#1f77b4"
 earth_color = "#8fbc8f"
@@ -133,6 +133,70 @@ def revenue_curve_component(model):
     solara.FigureMatplotlib(fig, format="png", bbox_inches="tight")
 
 
+@solara.component
+def boat_traffic_curve_component(model):
+    """Line chart of the number of boats by type at each simulation step."""
+    update_counter.get()
+
+    history = model.boat_count_history
+    fig = Figure(figsize=(3.6, 3.0))
+    ax = fig.add_subplot()
+
+    if history["total"]:
+        xs = [
+            step / model.STEPS_PER_HOUR
+            for step in range(1, len(history["total"]) + 1)
+        ]
+        ax.plot(
+            xs,
+            history["total"],
+            label="Total (sum of types)",
+            color="#1f77b4",
+            linewidth=1.8,
+            linestyle="--",
+            zorder=1,
+        )
+        labels = {
+            "fisher": "Fisher",
+            "transport": "Transport",
+            "cargo": "Cargo",
+        }
+        for boat_type in BOAT_TYPES:
+            ax.plot(
+                xs,
+                history[boat_type],
+                label=labels[boat_type],
+                color=TYPE_COLORS[boat_type],
+                linewidth=1.5,
+                zorder=2,
+            )
+        ax.set_xlabel("Simulation time (h)")
+        ax.set_ylabel("Number of boats")
+        ax.grid(True, alpha=0.3)
+        ax.legend(
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.28),
+            ncol=2,
+            fontsize=7,
+            frameon=False,
+        )
+        fig.subplots_adjust(bottom=0.34)
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "Waiting for the simulation to start",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=8,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    solara.FigureMatplotlib(fig, format="png", bbox_inches="tight")
+
+
 def _format_days(days: float | None) -> str:
     return "—" if days is None else f"{days:,.1f} days"
 
@@ -215,12 +279,13 @@ def build_model(scenario: Scenario) -> World:
     """Create a world and place the pathfinding demo boat on free water."""
     world = World(scenario, demo_boat_fish=None)
     test_boat = Boat(
-        size=3,
+        size=BOAT_TYPE_SIZES["cargo"],
         name="Test Boat Pathfinding",
         speed=1,
         capacity=50,
         fuel_consumption=1,
         fish=30,
+        boat_type="cargo",
     )
     for y in range(1, world.grid.height):
         for x in range(1, world.grid.width):
@@ -372,6 +437,8 @@ def Page():
             }
         ):
             time_component(model.value)
+            solara.Markdown("#### Boat traffic")
+            boat_traffic_curve_component(model.value)
             solara.Markdown("#### Revenue per 30 min")
             revenue_curve_component(model.value)
 

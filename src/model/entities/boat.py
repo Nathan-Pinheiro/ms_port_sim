@@ -18,6 +18,12 @@ BOAT_FOOTPRINTS: dict[int, tuple[int, int]] = {
 }
 
 DEFAULT_BOAT_SIZE = 1
+BOAT_TYPE_SIZES: dict[str, int] = {
+    "fisher": 1,
+    "transport": 2,
+    "cargo": 3,
+}
+BOAT_TYPES = tuple(BOAT_TYPE_SIZES)
 
 # 0 = north, 1 = east, 2 = south, 3 = west.
 DIRECTION_NORTH = 0

@@ -8,6 +8,8 @@ from mesa.space import PropertyLayer, SingleGrid
 
 from model.entities.boat import (
     BOAT_FOOTPRINTS,
+    BOAT_TYPES,
+    BOAT_TYPE_SIZES,
     Boat,
     DIRECTION_EAST,
     DIRECTION_NORTH,
@@ -97,6 +99,9 @@ class World(Model):
         )
 
         self.boats: list[Boat] = []
+        self.boat_count_history: dict[str, list[int]] = {
+            boat_type: [] for boat_type in (*BOAT_TYPES, "total")
+        }
         self.score = 0.0
         self.total_fish_deposited = 0
         self.total_reimbursed_price = 0.0
@@ -164,12 +169,13 @@ class World(Model):
 
         if demo_boat_fish is not None:
             demo_boat = Boat(
-                size=3,
+                size=BOAT_TYPE_SIZES["cargo"],
                 name="Demo boat",
                 speed=1,
                 capacity=max(50, demo_boat_fish),
                 fuel_consumption=1,
                 fish=demo_boat_fish,
+                boat_type="cargo",
             )
             self.add_boat(demo_boat, self.boat_spawn_position)
 
@@ -690,7 +696,7 @@ class World(Model):
         if self.random.random() >= self.ship_spawn_rate:
             return []
 
-        size = self.random.choice(tuple(BOAT_FOOTPRINTS))
+        boat_type = self.random.choice(BOAT_TYPES)
         fish = max(
             0,
             round(
@@ -701,12 +707,13 @@ class World(Model):
             ),
         )
         boat = Boat(
-            size=size,
+            size=BOAT_TYPE_SIZES[boat_type],
             name=f"Boat {self.boats_spawned + 1}",
             speed=1,
             capacity=max(fish, self.fish_amount, 1),
             fuel_consumption=1,
             fish=fish,
+            boat_type=boat_type,
         )
 
         position = self._find_spawn_placement(boat)
@@ -756,8 +763,19 @@ class World(Model):
 
         self._record_revenue()
         self.steps += 1
+        self._record_boat_counts()
         if self.steps >= self.MAX_STEPS:
             self.running = False
+
+    def _record_boat_counts(self) -> None:
+        counts = {boat_type: 0 for boat_type in BOAT_TYPES}
+        for boat in self.boats:
+            if boat.boat_type in counts:
+                counts[boat.boat_type] += 1
+
+        for boat_type, count in counts.items():
+            self.boat_count_history[boat_type].append(count)
+        self.boat_count_history["total"].append(sum(counts.values()))
 
     def _record_revenue(self) -> None:
         """Close a 30-minute revenue interval when the step count reaches it."""
