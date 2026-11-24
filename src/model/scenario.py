@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from model.arrival_profiles import DEFAULT_PORT_TYPE
+
 
 @dataclass(frozen=True)
 class Scenario:
@@ -15,11 +17,11 @@ class Scenario:
     port_tiles: tuple[tuple[int, ...], ...] | None = None
     scale: int = 3
     torus: bool = False
-    ship_spawn_rate: float = 0.04
+    port_type: str = DEFAULT_PORT_TYPE
     fish_amount: int = 50
     fish_standard_deviation: float = 5.0
-    fish_price: float = 1.0
-    fuel_price: float = 1.0
+    fish_price: float = 5.0
+    fuel_price: float = 1.5
     fuel_station_construction_cost: int = 10_000_000
     deposit_station_construction_cost: int = 20_000_000
     boat_scale: float = 1.0
