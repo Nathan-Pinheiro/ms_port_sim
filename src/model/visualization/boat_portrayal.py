@@ -21,7 +21,6 @@ from model.entities.boat import BOAT_FOOTPRINTS, Boat
 
 RESOURCES_DIR = Path(__file__).resolve().parent.parent / "resources" / "boats"
 
-DEFAULT_MAX_FISH = 100
 WHITE_LIGHTNESS = 0.97
 
 TYPE_COLORS: dict[str, str] = {
@@ -284,11 +283,11 @@ def _rgb_to_hex(rgb: tuple[float, float, float]) -> str:
 
 def tint_boat_color(
     base_hex: str,
-    fish_ratio: float,
+    need_ratio: float,
     white_lightness: float = WHITE_LIGHTNESS,
 ) -> str:
-    """Fade a boat toward white as it empties, keeping its hue."""
-    ratio = max(0.0, min(1.0, fish_ratio))
+    """Fade a boat toward white as its fuel need decreases."""
+    ratio = max(0.0, min(1.0, need_ratio))
     r, g, b = _hex_to_rgb(base_hex)
     hue, lightness, saturation = colorsys.rgb_to_hls(r, g, b)
     new_saturation = saturation * ratio
@@ -322,15 +321,10 @@ def _resolve_color(raw: str | None, color_map: dict[str, str]) -> str:
 
 
 def boat_color(boat: Boat) -> str:
-    """Boat colour: type hue modulated by its ``fish / capacity`` ratio."""
+    """Boat colour: type hue modulated by its fuel need."""
     boat_type = getattr(boat, "boat_type", "default") or "default"
     base_hex = TYPE_COLORS.get(boat_type, TYPE_COLORS["default"])
-
-    capacity = getattr(boat, "capacity", 0) or 0
-    if capacity <= 0:
-        capacity = DEFAULT_MAX_FISH
-    ratio = max(0.0, min(1.0, getattr(boat, "fish", 0) / capacity))
-    return tint_boat_color(base_hex, ratio)
+    return tint_boat_color(base_hex, boat.fuel_need)
 
 
 def _rotate(

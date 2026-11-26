@@ -8,9 +8,13 @@ from mesa.visualization.solara_viz import ModelController, ShowSteps
 from mesa.visualization.utils import update_counter
 
 from model import map_io
-from model.entities.boat import Boat
+from model.entities.boat import DEFAULT_FUEL_CAPACITY, Boat
 from model.model import World
-from model.scenario import Scenario
+from model.scenario import (
+    DEFAULT_FISH_UNLOAD_FACTOR,
+    DEFAULT_FUEL_REFILL_FACTOR,
+    Scenario,
+)
 from model.visualization.boat_portrayal import draw_boats
 
 water_color = "#1f77b4"
@@ -219,7 +223,12 @@ def build_model(scenario: Scenario) -> World:
         name="Test Boat Pathfinding",
         speed=1,
         capacity=50,
-        fuel_consumption=1,
+        initial_fuel=(
+            DEFAULT_FUEL_CAPACITY
+            * world.random.uniform(
+                world.initial_fuel_min_ratio, world.initial_fuel_max_ratio
+            )
+        ),
         fish=30,
     )
     for y in range(1, world.grid.height):
@@ -231,7 +240,12 @@ def build_model(scenario: Scenario) -> World:
     return world
 
 
-def make_scenario(map_name: str, config_name: str) -> Scenario:
+def make_scenario(
+    map_name: str,
+    config_name: str,
+    fish_unload_factor: float = DEFAULT_FISH_UNLOAD_FACTOR,
+    fuel_refill_factor: float = DEFAULT_FUEL_REFILL_FACTOR,
+) -> Scenario:
     return Scenario(
         map_name=map_name,
         port_config_name=config_name,
@@ -240,6 +254,8 @@ def make_scenario(map_name: str, config_name: str) -> Scenario:
         fish_standard_deviation=5.0,
         fish_price=10.0,
         fuel_price=2.0,
+        fish_unload_factor=fish_unload_factor,
+        fuel_refill_factor=fuel_refill_factor,
         seed=42,
     )
 
@@ -259,6 +275,8 @@ def Page():
     play_interval = solara.use_reactive(100)
     render_interval = solara.use_reactive(1)
     use_threads = solara.use_reactive(False)
+    fish_unload_factor = solara.use_reactive(initial_model.fish_unload_factor)
+    fuel_refill_factor = solara.use_reactive(initial_model.fuel_refill_factor)
 
     maps = map_io.list_maps()
     selected_map = solara.use_reactive(model.value.map_name)
@@ -271,11 +289,24 @@ def Page():
         available = map_io.list_port_configs(name)
         selected_config.set(available[0] if available else "")
 
+    def set_fish_unload_factor(value: float) -> None:
+        fish_unload_factor.set(value)
+        model.value.fish_unload_factor = value
+
+    def set_fuel_refill_factor(value: float) -> None:
+        fuel_refill_factor.set(value)
+        model.value.fuel_refill_factor = value
+
     def load_selected() -> None:
         if not selected_map.value or not selected_config.value:
             port_message.set("Choose a map and a port configuration first.")
             return
-        scenario = make_scenario(selected_map.value, selected_config.value)
+        scenario = make_scenario(
+            selected_map.value,
+            selected_config.value,
+            fish_unload_factor=fish_unload_factor.value,
+            fuel_refill_factor=fuel_refill_factor.value,
+        )
         try:
             new_model = build_model(scenario)
         except (map_io.MapError, ValueError) as exc:
@@ -295,6 +326,26 @@ def Page():
     with solara.Sidebar(), solara.Column(
         style={"width": "310px", "overflowX": "auto"}
     ):
+        with solara.Card("Service speeds"):
+            solara.Markdown(
+                "Fraction of a boat's capacity handled per service step."
+            )
+            solara.SliderFloat(
+                label="Unload speed",
+                value=fish_unload_factor.value,
+                on_value=set_fish_unload_factor,
+                min=0.01,
+                max=1.0,
+                step=0.01,
+            )
+            solara.SliderFloat(
+                label="Refill speed",
+                value=fuel_refill_factor.value,
+                on_value=set_fuel_refill_factor,
+                min=0.01,
+                max=1.0,
+                step=0.01,
+            )
         with solara.Card("Port"):
             solara.Select(
                 label="Area map",
