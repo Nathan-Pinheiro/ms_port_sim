@@ -96,11 +96,6 @@ class Boat(Agent):
         return max(0.0, min(1.0, self.fuel / self.fuel_capacity))
 
     @property
-    def fuel_need(self) -> float:
-        """How much fuel the boat is missing, from ``0`` full to ``1`` empty."""
-        return 1.0 - self.fuel_ratio
-
-    @property
     def footprint(self) -> tuple[int, int]:
         """Footprint as ``(width, height)`` in cells for the current heading."""
         length, beam = BOAT_FOOTPRINTS[self.size_key]
