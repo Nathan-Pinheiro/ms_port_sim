@@ -204,6 +204,9 @@ def costs_component(model):
         f"| Deposit station | {model.deposit_station_count} | "
         f"{model.deposit_station_construction_cost:,} € | "
         f"{model.deposit_station_total_cost:,} € |\n"
+        f"| Artificial land | {model.artificial_land_count} | "
+        f"{model.artificial_land_construction_cost:,} € | "
+        f"{model.artificial_land_total_cost:,} € |\n"
         f"| **Port total** | — | — | **{model.total_cost:,} €** |"
     )
 

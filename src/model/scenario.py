@@ -30,5 +30,6 @@ class Scenario:
     initial_fuel_max_ratio: float = 0.9
     fuel_station_construction_cost: int = 10_000_000
     deposit_station_construction_cost: int = 20_000_000
+    artificial_land_construction_cost: int = 1_000_000
     boat_scale: float = 1.0
     seed: int | None = None

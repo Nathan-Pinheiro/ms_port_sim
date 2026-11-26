@@ -49,6 +49,7 @@ class World(Model):
     FUEL_STATION = 3
     DEPOSIT_STATION = 2
     ENTRY_EXIT = 4
+    ARTIFICIAL_LAND = 5
     FUEL_ADJACENT = 18
     DEPOSIT_ADJACENT = 8
 
@@ -109,6 +110,9 @@ class World(Model):
         self.deposit_station_construction_cost = (
             scenario.deposit_station_construction_cost
         )
+        self.artificial_land_construction_cost = (
+            scenario.artificial_land_construction_cost
+        )
         self.map_name = scenario.map_name
         self.port_config_name = scenario.port_config_name
 
@@ -122,19 +126,19 @@ class World(Model):
             )["tiles"]
         fused_tiles = fuse_tiles(area_tiles, port_tiles)
 
-        self.fuel_station_count = self._count_station_components(
+        self.fuel_station_count = self._count_tiles(
             fused_tiles, self.FUEL_STATION
         )
-        self.deposit_station_count = sum(
-            1
-            for row in fused_tiles
-            for value in row
-            if value == self.DEPOSIT_STATION
+        self.deposit_station_count = self._count_tiles(
+            fused_tiles, self.DEPOSIT_STATION
+        )
+        self.artificial_land_count = self._count_tiles(
+            fused_tiles, self.ARTIFICIAL_LAND
         )
         self.total_construction_cost = (
-            self.fuel_station_count * self.fuel_station_construction_cost
-            + self.deposit_station_count
-            * self.deposit_station_construction_cost
+            self.fuel_station_total_cost
+            + self.deposit_station_total_cost
+            + self.artificial_land_total_cost
         )
 
         self.boats: list[Boat] = []
@@ -235,32 +239,11 @@ class World(Model):
             self.add_boat(demo_boat, self.boat_spawn_position)
 
     @staticmethod
-    def _count_station_components(
-        tiles: tuple[tuple[int, ...], ...], station_value: int
+    def _count_tiles(
+        tiles: tuple[tuple[int, ...], ...], value: int
     ) -> int:
-        """Count connected groups of station cells."""
-        station_cells = {
-            (x, y)
-            for y, row in enumerate(tiles)
-            for x, value in enumerate(row)
-            if value == station_value
-        }
-        count = 0
-        while station_cells:
-            count += 1
-            pending = [station_cells.pop()]
-            while pending:
-                x, y = pending.pop()
-                for neighbor in (
-                    (x - 1, y),
-                    (x + 1, y),
-                    (x, y - 1),
-                    (x, y + 1),
-                ):
-                    if neighbor in station_cells:
-                        station_cells.remove(neighbor)
-                        pending.append(neighbor)
-        return count
+        """Count individual tiles of a given terrain value."""
+        return sum(1 for row in tiles for cell in row if cell == value)
 
     def _build_scaled_tiles(self, source_tiles, map_scale: int):
         source_height = len(source_tiles)
@@ -1001,6 +984,13 @@ class World(Model):
         return (
             self.deposit_station_count
             * self.deposit_station_construction_cost
+        )
+
+    @property
+    def artificial_land_total_cost(self) -> float:
+        return (
+            self.artificial_land_count
+            * self.artificial_land_construction_cost
         )
 
     @property
