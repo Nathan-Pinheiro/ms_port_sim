@@ -9,6 +9,10 @@ from mesa.visualization.utils import update_counter
 
 from model import map_io
 from model.entities.boat import DEFAULT_FUEL_CAPACITY, Boat
+from model.arrival_profiles import (
+    DEFAULT_PORT_TYPE,
+    PORT_TYPE_LABELS,
+)
 from model.model import World
 from model.scenario import (
     DEFAULT_FISH_UNLOAD_FACTOR,
@@ -101,6 +105,17 @@ def time_component(model):
     solara.Markdown(f"**Simulated time:** {model.simulation_time}")
 
 
+def _revenue_time_ticks(
+    start_hour: int,
+    duration_hours: int,
+) -> tuple[list[int], list[str]]:
+    offsets = list(range(0, duration_hours + 1, 2))
+    if offsets[-1] != duration_hours:
+        offsets.append(duration_hours)
+    labels = [f"{(start_hour + offset) % 24:02d}:00" for offset in offsets]
+    return offsets, labels
+
+
 @solara.component
 def revenue_curve_component(model):
     """Line chart of the money earned during each 30-minute interval."""
@@ -111,14 +126,19 @@ def revenue_curve_component(model):
     ax = fig.add_subplot()
 
     if values:
-        xs = list(range(1, len(values) + 1))
+        interval_hours = model.REVENUE_INTERVAL_MINUTES / 60
+        xs = [
+            interval_hours * index
+            for index in range(1, len(values) + 1)
+        ]
         ax.plot(xs, values, marker="o", color="#1f77b4", linewidth=1.5)
-        labels = []
-        for index in range(len(values)):
-            minutes = (index + 1) * model.REVENUE_INTERVAL_MINUTES
-            labels.append(f"{minutes // 60}:{minutes % 60:02d}")
-        ax.set_xticks(xs)
-        ax.set_xticklabels(labels, rotation=45, fontsize=7)
+        ticks, labels = _revenue_time_ticks(
+            model.SIMULATION_START_HOUR,
+            model.SIMULATION_HOURS,
+        )
+        ax.set_xlim(0, model.SIMULATION_HOURS)
+        ax.set_xticks(ticks)
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
         ax.set_ylabel("Revenue (€)")
         ax.grid(True, alpha=0.3)
     else:
@@ -243,17 +263,18 @@ def build_model(scenario: Scenario) -> World:
 def make_scenario(
     map_name: str,
     config_name: str,
+    port_type: str = DEFAULT_PORT_TYPE,
     fish_unload_factor: float = DEFAULT_FISH_UNLOAD_FACTOR,
     fuel_refill_factor: float = DEFAULT_FUEL_REFILL_FACTOR,
 ) -> Scenario:
     return Scenario(
         map_name=map_name,
         port_config_name=config_name,
-        ship_spawn_rate=0.04,
+        port_type=port_type,
         fish_amount=50,
         fish_standard_deviation=5.0,
-        fish_price=10.0,
-        fuel_price=2.0,
+        fish_price=5.0,
+        fuel_price=1.5,
         fish_unload_factor=fish_unload_factor,
         fuel_refill_factor=fuel_refill_factor,
         seed=42,
@@ -281,6 +302,7 @@ def Page():
     maps = map_io.list_maps()
     selected_map = solara.use_reactive(model.value.map_name)
     selected_config = solara.use_reactive(model.value.port_config_name)
+    selected_port_type = solara.use_reactive(model.value.port_type)
     configs = map_io.list_port_configs(selected_map.value)
     port_message = solara.use_reactive("")
 
@@ -297,6 +319,14 @@ def Page():
         fuel_refill_factor.set(value)
         model.value.fuel_refill_factor = value
 
+    def on_port_type_change(label: str) -> None:
+        selected_port_type.set(
+            next(
+                key for key, value in PORT_TYPE_LABELS.items()
+                if value == label
+            )
+        )
+
     def load_selected() -> None:
         if not selected_map.value or not selected_config.value:
             port_message.set("Choose a map and a port configuration first.")
@@ -304,6 +334,7 @@ def Page():
         scenario = make_scenario(
             selected_map.value,
             selected_config.value,
+            port_type=selected_port_type.value,
             fish_unload_factor=fish_unload_factor.value,
             fuel_refill_factor=fuel_refill_factor.value,
         )
@@ -363,10 +394,17 @@ def Page():
                 ),
                 on_value=selected_config.set,
             )
+            solara.Select(
+                label="Port type",
+                values=list(PORT_TYPE_LABELS.values()),
+                value=PORT_TYPE_LABELS[selected_port_type.value],
+                on_value=on_port_type_change,
+            )
             solara.Button("Load map / configuration", on_click=load_selected)
             solara.Markdown(
                 f"**Loaded:** {model.value.map_name} / "
-                f"{model.value.port_config_name}"
+                f"{model.value.port_config_name} — "
+                f"{PORT_TYPE_LABELS[model.value.port_type]}"
             )
             if port_message.value:
                 solara.Markdown(f"_{port_message.value}_")

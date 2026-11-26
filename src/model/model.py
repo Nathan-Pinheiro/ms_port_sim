@@ -7,7 +7,6 @@ from mesa import Agent, Model
 from mesa.space import PropertyLayer, SingleGrid
 
 from model.entities.boat import (
-    BOAT_FOOTPRINTS,
     Boat,
     DEFAULT_FUEL_CAPACITY,
     DIRECTION_EAST,
@@ -18,6 +17,7 @@ from model.entities.boat import (
     MOVE_BLOCKED,
     MOVE_MOVED,
 )
+from model.arrival_profiles import build_daily_arrival_schedule
 from model.map_io import fuse_tiles, load_map, load_port_config
 from model.pathfinding import generate_flow_field
 from model.scenario import (
@@ -54,7 +54,9 @@ class World(Model):
 
     NAVIGABLE = frozenset({WATER, ENTRY_EXIT, FUEL_ADJACENT, DEPOSIT_ADJACENT})
     STEPS_PER_HOUR = 300
-    SIMULATION_HOURS = 24
+    SIMULATION_START_HOUR = 7
+    SIMULATION_END_HOUR = 21
+    SIMULATION_HOURS = SIMULATION_END_HOUR - SIMULATION_START_HOUR
     MAX_STEPS = STEPS_PER_HOUR * SIMULATION_HOURS
     REVENUE_INTERVAL_MINUTES = 30
     STEPS_PER_REVENUE_INTERVAL = STEPS_PER_HOUR * REVENUE_INTERVAL_MINUTES // 60
@@ -88,6 +90,15 @@ class World(Model):
         self.fish_unload_factor = scenario.fish_unload_factor
         self.fuel_refill_factor = scenario.fuel_refill_factor
         self.ship_spawn_rate = scenario.ship_spawn_rate
+        self.port_type = scenario.port_type
+        self._arrival_schedule = build_daily_arrival_schedule(
+            scenario.port_type,
+            self.random,
+            steps_per_hour=self.STEPS_PER_HOUR,
+            simulation_start_hour=self.SIMULATION_START_HOUR,
+            simulation_end_hour=self.SIMULATION_END_HOUR,
+        )
+        self._pending_boat_sizes: deque[int] = deque()
         self.fish_amount = scenario.fish_amount
         self.fish_standard_deviation = scenario.fish_standard_deviation
         self.boat_scale = scenario.boat_scale
@@ -772,39 +783,43 @@ class World(Model):
         return DEFAULT_FUEL_CAPACITY * ratio
 
     def spawn_boats(self) -> list[Boat]:
-        """Spawn one random boat on a free entry cell with probability
-        ``ship_spawn_rate``; its fish follow a normal distribution."""
-        if self.ship_spawn_rate <= 0:
-            return []
-        if self.random.random() >= self.ship_spawn_rate:
-            return []
-
-        size = self.random.choice(tuple(BOAT_FOOTPRINTS))
-        fish = max(
-            0,
-            round(
-                self.random.gauss(
-                    self.fish_amount,
-                    self.fish_standard_deviation,
-                )
-            ),
-        )
-        boat = Boat(
-            size=size,
-            name=f"Boat {self.boats_spawned + 1}",
-            speed=1,
-            capacity=max(fish, self.fish_amount, 1),
-            initial_fuel=self._random_initial_fuel(),
-            fish=fish,
+        """Spawn scheduled arrivals, retaining boats while the entrance is busy."""
+        self._pending_boat_sizes.extend(
+            self._arrival_schedule.pop(self.steps, ())
         )
 
-        position = self._find_spawn_placement(boat)
-        if position is None:
-            return []
+        spawned = []
+        pending_count = len(self._pending_boat_sizes)
+        for _ in range(pending_count):
+            size = self._pending_boat_sizes.popleft()
+            fish = max(
+                0,
+                round(
+                    self.random.gauss(
+                        self.fish_amount,
+                        self.fish_standard_deviation,
+                    )
+                ),
+            )
+            boat = Boat(
+                size=size,
+                name=f"Boat {self.boats_spawned + 1}",
+                speed=1,
+                capacity=max(fish, self.fish_amount, 1),
+                initial_fuel=self._random_initial_fuel(),
+                fish=fish,
+            )
 
-        self.add_boat(boat, position)
-        self.boats_spawned += 1
-        return [boat]
+            position = self._find_spawn_placement(boat)
+            if position is None:
+                self._pending_boat_sizes.append(size)
+                continue
+
+            self.add_boat(boat, position)
+            self.boats_spawned += 1
+            spawned.append(boat)
+            break
+        return spawned
 
     @staticmethod
     def _objective_priority(boat: Boat) -> int:
@@ -953,16 +968,13 @@ class World(Model):
     @property
     def simulation_time(self) -> str:
         """Simulated time in 12-hour format."""
-        total_minutes = self.steps * 60 // self.STEPS_PER_HOUR
+        total_minutes = (
+            self.SIMULATION_START_HOUR * 60
+            + self.steps * 60 // self.STEPS_PER_HOUR
+        )
         hours_24, minutes = divmod(total_minutes, 60)
-        hours_12 = 0 if hours_24 == self.SIMULATION_HOURS else (
-            hours_24 if hours_24 <= 12 else hours_24 - 12
-        )
-        period = (
-            "am"
-            if hours_24 < 12 or hours_24 == self.SIMULATION_HOURS
-            else "pm"
-        )
+        hours_12 = hours_24 % 12 or 12
+        period = "am" if hours_24 < 12 else "pm"
         return f"{hours_12}:{minutes:02d}{period}"
 
     @property
@@ -1016,7 +1028,7 @@ class World(Model):
 
     @property
     def estimated_daily_revenue(self) -> float:
-        return self.revenue_per_hour * 24
+        return self.revenue_per_hour * self.SIMULATION_HOURS
 
     @property
     def estimated_annual_revenue(self) -> float:
