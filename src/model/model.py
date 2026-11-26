@@ -8,15 +8,23 @@ from mesa.space import PropertyLayer, SingleGrid
 
 from model.entities.boat import (
     Boat,
+    DEFAULT_FUEL_CAPACITY,
     DIRECTION_EAST,
     DIRECTION_NORTH,
     DIRECTION_SOUTH,
     DIRECTION_WEST,
+    MOVE_ARRIVED,
+    MOVE_BLOCKED,
+    MOVE_MOVED,
 )
 from model.arrival_profiles import build_daily_arrival_schedule
 from model.map_io import fuse_tiles, load_map, load_port_config
 from model.pathfinding import generate_flow_field
-from model.scenario import Scenario
+from model.scenario import (
+    DEFAULT_FISH_UNLOAD_FACTOR,
+    DEFAULT_FUEL_REFILL_FACTOR,
+    Scenario,
+)
 from model.tiles.deposit_zone import DepositZone
 
 
@@ -28,8 +36,12 @@ class World(Model):
     ``8`` water next to a deposit and ``18`` water next to a fuel station.
     """
 
-    fuel_threshold = 25.0
-    FISH_UNLOAD_PER_STEP = 2
+    # Fraction of fuel capacity below which an empty boat refuels.
+    fuel_threshold = 0.95
+    # Default fractions of capacity handled per service step; the scenario
+    # values (settable in the UI) override these on each World instance.
+    FISH_UNLOAD_FACTOR = DEFAULT_FISH_UNLOAD_FACTOR
+    FUEL_REFILL_FACTOR = DEFAULT_FUEL_REFILL_FACTOR
     deposit_access_position = (6, 11)
 
     WATER = 0
@@ -37,6 +49,7 @@ class World(Model):
     FUEL_STATION = 3
     DEPOSIT_STATION = 2
     ENTRY_EXIT = 4
+    ARTIFICIAL_LAND = 5
     FUEL_ADJACENT = 18
     DEPOSIT_ADJACENT = 8
 
@@ -58,9 +71,25 @@ class World(Model):
             raise ValueError("scenario.scale must be a positive integer")
         if scenario.fish_price < 0 or scenario.fuel_price < 0:
             raise ValueError("fish_price and fuel_price must be non-negative")
+        if not (
+            0 <= scenario.initial_fuel_min_ratio
+            <= scenario.initial_fuel_max_ratio
+            <= 1
+        ):
+            raise ValueError(
+                "initial fuel ratios must satisfy 0 <= min <= max <= 1"
+            )
+        if not 0 < scenario.fish_unload_factor <= 1:
+            raise ValueError("fish_unload_factor must be between 0 and 1")
+        if not 0 < scenario.fuel_refill_factor <= 1:
+            raise ValueError("fuel_refill_factor must be between 0 and 1")
 
         super().__init__(seed=scenario.seed)
 
+        self.initial_fuel_min_ratio = scenario.initial_fuel_min_ratio
+        self.initial_fuel_max_ratio = scenario.initial_fuel_max_ratio
+        self.fish_unload_factor = scenario.fish_unload_factor
+        self.fuel_refill_factor = scenario.fuel_refill_factor
         self.port_type = scenario.port_type
         self._arrival_schedule = build_daily_arrival_schedule(
             scenario.port_type,
@@ -81,6 +110,9 @@ class World(Model):
         self.deposit_station_construction_cost = (
             scenario.deposit_station_construction_cost
         )
+        self.artificial_land_construction_cost = (
+            scenario.artificial_land_construction_cost
+        )
         self.map_name = scenario.map_name
         self.port_config_name = scenario.port_config_name
 
@@ -94,16 +126,19 @@ class World(Model):
             )["tiles"]
         fused_tiles = fuse_tiles(area_tiles, port_tiles)
 
-        self.fuel_station_count = self._count_station_components(
+        self.fuel_station_count = self._count_tiles(
             fused_tiles, self.FUEL_STATION
         )
-        self.deposit_station_count = self._count_station_components(
+        self.deposit_station_count = self._count_tiles(
             fused_tiles, self.DEPOSIT_STATION
         )
+        self.artificial_land_count = self._count_tiles(
+            fused_tiles, self.ARTIFICIAL_LAND
+        )
         self.total_construction_cost = (
-            self.fuel_station_count * self.fuel_station_construction_cost
-            + self.deposit_station_count
-            * self.deposit_station_construction_cost
+            self.fuel_station_total_cost
+            + self.deposit_station_total_cost
+            + self.artificial_land_total_cost
         )
 
         self.boats: list[Boat] = []
@@ -118,6 +153,10 @@ class World(Model):
         self.current_interval_revenue = 0.0
         self._last_total_revenue = 0.0
         self.flow_fields: dict = {}
+        # Exclusive access-cell reservations for boats heading to deposit.
+        self.deposit_reservations: dict[
+            tuple[int, int], Boat
+        ] = {}
 
         tiles = self._build_scaled_tiles(fused_tiles, scenario.scale)
         height = len(tiles)
@@ -154,6 +193,21 @@ class World(Model):
             )
         self.boat_spawn_position = self.entry_exit_cells[0]
         self.deposit_stations = self._find_deposit_stations()
+        self.deposit_access_positions = tuple(
+            sorted(
+                {
+                    position
+                    for station in self.deposit_stations
+                    for position in station.access_positions
+                }
+            )
+        )
+        self.fuel_access_positions = tuple(
+            (x, y)
+            for x in range(width)
+            for y in range(height)
+            if terrain_layer.data[x][y] == self.FUEL_ADJACENT
+        )
 
         self.agitation = self.compute_agitation()
         agitation_layer = PropertyLayer(
@@ -170,7 +224,8 @@ class World(Model):
                 )
                 agitation_layer.set_cell((x, y), value)
 
-        self.update_deposit_flow_field()
+        self._rebuild_flow_field("deposit", self.deposit_access_positions)
+        self._rebuild_flow_field("fuel", self.fuel_access_positions)
 
         if demo_boat_fish is not None:
             demo_boat = Boat(
@@ -178,38 +233,17 @@ class World(Model):
                 name="Demo boat",
                 speed=1,
                 capacity=max(50, demo_boat_fish),
-                fuel_consumption=1,
+                initial_fuel=self._random_initial_fuel(),
                 fish=demo_boat_fish,
             )
             self.add_boat(demo_boat, self.boat_spawn_position)
 
     @staticmethod
-    def _count_station_components(
-        tiles: tuple[tuple[int, ...], ...], station_value: int
+    def _count_tiles(
+        tiles: tuple[tuple[int, ...], ...], value: int
     ) -> int:
-        """Count connected groups of station cells."""
-        station_cells = {
-            (x, y)
-            for y, row in enumerate(tiles)
-            for x, value in enumerate(row)
-            if value == station_value
-        }
-        count = 0
-        while station_cells:
-            count += 1
-            pending = [station_cells.pop()]
-            while pending:
-                x, y = pending.pop()
-                for neighbor in (
-                    (x - 1, y),
-                    (x + 1, y),
-                    (x, y - 1),
-                    (x, y + 1),
-                ):
-                    if neighbor in station_cells:
-                        station_cells.remove(neighbor)
-                        pending.append(neighbor)
-        return count
+        """Count individual tiles of a given terrain value."""
+        return sum(1 for row in tiles for cell in row if cell == value)
 
     def _build_scaled_tiles(self, source_tiles, map_scale: int):
         source_height = len(source_tiles)
@@ -386,70 +420,36 @@ class World(Model):
         terrain = self.grid.properties["terrain"].data[x][y]
         return terrain in self.NAVIGABLE
 
-    def get_available_deposit_positions(self) -> list[tuple[int, int]]:
-        """Service cells of free stations, or of every station if all are busy."""
-        available = [
-            position
-            for station in self.deposit_stations
-            if not station.is_occupied
-            for position in station.access_positions
-            if self.grid.is_cell_empty(position)
-        ]
-        if available:
-            return available
-        return [
-            position
-            for station in self.deposit_stations
-            for position in station.access_positions
-        ]
-
     def _find_deposit_stations(self) -> list[DepositZone]:
-        """Build one station per connected group of deposit cells."""
+        """Build one station per deposit tile."""
         terrain = self.grid.properties["terrain"].data
-        remaining = {
-            (x, y)
-            for x in range(self.grid.width)
-            for y in range(self.grid.height)
-            if terrain[x][y] == self.DEPOSIT_STATION
-        }
         stations = []
-        while remaining:
-            first = remaining.pop()
-            cells = {first}
-            pending = deque([first])
-            while pending:
-                x, y = pending.popleft()
-                for neighbor in (
-                    (x - 1, y),
-                    (x + 1, y),
-                    (x, y - 1),
-                    (x, y + 1),
-                ):
-                    if neighbor in remaining:
-                        remaining.remove(neighbor)
-                        cells.add(neighbor)
-                        pending.append(neighbor)
-
-            access_positions = {
-                neighbor
-                for x, y in cells
-                for neighbor in (
-                    (x - 1, y),
-                    (x + 1, y),
-                    (x, y - 1),
-                    (x, y + 1),
-                )
-                if not self.grid.out_of_bounds(neighbor)
-                and terrain[neighbor[0]][neighbor[1]] == self.DEPOSIT_ADJACENT
-            }
-            if access_positions:
-                stations.append(
-                    DepositZone(
-                        self,
-                        cells=tuple(sorted(cells)),
-                        access_positions=tuple(sorted(access_positions)),
+        for x in range(self.grid.width):
+            for y in range(self.grid.height):
+                if terrain[x][y] != self.DEPOSIT_STATION:
+                    continue
+                access_positions = tuple(
+                    sorted(
+                        neighbor
+                        for neighbor in (
+                            (x - 1, y),
+                            (x + 1, y),
+                            (x, y - 1),
+                            (x, y + 1),
+                        )
+                        if not self.grid.out_of_bounds(neighbor)
+                        and terrain[neighbor[0]][neighbor[1]]
+                        == self.DEPOSIT_ADJACENT
                     )
                 )
+                if access_positions:
+                    stations.append(
+                        DepositZone(
+                            self,
+                            cell=(x, y),
+                            access_positions=access_positions,
+                        )
+                    )
         return stations
 
     def _set_boat_target(
@@ -472,16 +472,22 @@ class World(Model):
             is_walkable_func=self.is_cell_walkable,
         )
 
-    def _find_station_target(
+    def _find_target_path(
         self,
         boat: Boat,
-        station: DepositZone,
+        targets: tuple[tuple[int, int], ...],
+        *,
+        occupied: set[tuple[int, int]] | None = None,
     ) -> tuple[
         tuple[int, int],
-        int,
         list[tuple[tuple[int, int], int]],
     ] | None:
-        if boat.position is None:
+        """Return the shortest path to any target cell where the boat fits.
+
+        ``occupied`` lets the caller treat other boats' footprints as
+        temporary obstacles so a blocked boat can plan around them.
+        """
+        if boat.position is None or not targets:
             return None
 
         directions = (
@@ -490,17 +496,13 @@ class World(Model):
             DIRECTION_SOUTH,
             DIRECTION_WEST,
         )
-        targets = set(station.access_positions)
+        target_set = set(targets)
         start = boat.position
         parents: dict[
             tuple[int, int],
             tuple[tuple[int, int], int] | None,
         ] = {start: None}
         pending = deque([start])
-        target_paths: dict[
-            tuple[tuple[int, int], int],
-            list[tuple[tuple[int, int], int]],
-        ] = {}
 
         def path_to(
             position: tuple[int, int],
@@ -517,10 +519,12 @@ class World(Model):
             path.reverse()
             return path
 
-        if start in targets:
+        if start in target_set:
             for direction in directions:
-                if self._boat_fits_at(boat, start, direction):
-                    target_paths[(start, direction)] = []
+                if self._boat_fits_at(
+                    boat, start, direction, occupied=occupied
+                ):
+                    return start, []
 
         while pending:
             current = pending.popleft()
@@ -537,136 +541,197 @@ class World(Model):
                 neighbor = (current[0] + dx, current[1] + dy)
                 direction = Boat._direction_from_delta(dx, dy)
 
-                if neighbor in targets:
-                    path_prefix = path_to(current)
+                if neighbor in target_set:
                     for target_direction in directions:
-                        key = (neighbor, target_direction)
-                        if (
-                            key not in target_paths
-                            and self._boat_fits_at(
-                                boat, neighbor, target_direction
-                            )
+                        if self._boat_fits_at(
+                            boat,
+                            neighbor,
+                            target_direction,
+                            occupied=occupied,
                         ):
-                            target_paths[key] = path_prefix + [
-                                (neighbor, target_direction)
-                            ]
+                            return (
+                                neighbor,
+                                path_to(current)
+                                + [(neighbor, target_direction)],
+                            )
 
                 if neighbor not in parents and self._boat_fits_at(
-                    boat, neighbor, direction
+                    boat, neighbor, direction, occupied=occupied
                 ):
                     parents[neighbor] = (current, direction)
                     pending.append(neighbor)
 
-        if not target_paths:
-            return None
+        return None
 
-        (target, direction), path = min(
-            target_paths.items(),
-            key=lambda item: (
-                len(item[1]),
-                item[0][0],
-                item[0][1],
-            ),
-        )
-        return target, direction, path
-
-    def _assign_deposit_station(self, boat: Boat) -> None:
-        if boat.position is None or boat.fish <= 0:
-            return
-
-        candidates = []
-        for station in self.deposit_stations:
-            target_info = self._find_station_target(boat, station)
-            if target_info is None:
+    def _occupied_cells(
+        self, exclude: Boat | None = None
+    ) -> set[tuple[int, int]]:
+        """Cells currently covered by boats other than ``exclude``."""
+        occupied: set[tuple[int, int]] = set()
+        for other in self.boats:
+            if other is exclude or other.position is None:
                 continue
-            target, direction, path = target_info
-            candidates.append((station, len(path), target, direction, path))
+            occupied.update(other.occupied_cells())
+        return occupied
 
-        if not candidates:
-            return
+    def _release_deposit_target(self, boat: Boat) -> None:
+        target = boat.navigation_target
+        if target is not None and self.deposit_reservations.get(target) is boat:
+            del self.deposit_reservations[target]
 
-        station, _, target, direction, path = min(
-            candidates,
-            key=lambda item: (len(item[0].queue), item[1]),
+    def _assign_deposit(self, boat: Boat) -> bool:
+        """Pick a free berth, reserving it so no other boat targets it."""
+        old_target = (
+            boat.navigation_target if boat.objective == "deposit" else None
         )
+        occupied = self._occupied_cells(exclude=boat)
+        reserved = {
+            cell
+            for cell, owner in self.deposit_reservations.items()
+            if owner is not boat
+        }
+        targets = [
+            cell
+            for cell in self.deposit_access_positions
+            if cell not in reserved and cell not in occupied
+        ]
+        target_info = None
+        if targets:
+            target_info = self._find_target_path(
+                boat, tuple(targets), occupied=occupied
+            )
+        if target_info is None:
+            # Let the boat at least move toward the harbour through a
+            # temporary crowd; it will re-plan when it gets blocked.
+            free_targets = tuple(
+                cell
+                for cell in self.deposit_access_positions
+                if cell not in reserved
+            )
+            if free_targets:
+                target_info = self._find_target_path(boat, free_targets)
+        if target_info is None:
+            return False
 
-        station.queue.append(boat)
-        boat.deposit_station = station
-        boat.deposit_status = (
-            "approaching" if station.active_boat is None else "waiting"
-        )
-        boat.navigation_direction = direction
+        target, path = target_info
+        if old_target is not None and old_target != target:
+            self._release_deposit_target(boat)
+        boat.objective = "deposit"
+        boat.exit_directions = {}
         self._set_boat_target(boat, target)
         boat.navigation_path = path
-        if station.active_boat is None:
-            station.occupy(boat)
+        self.deposit_reservations[target] = boat
+        return True
+
+    def _assign_fuel(self, boat: Boat) -> bool:
+        if not self.fuel_access_positions:
+            return False
+        self._release_deposit_target(boat)
+        boat.objective = "fuel"
+        boat.navigation_target = None
+        boat.navigation_path = []
+        boat.exit_directions = {}
+        self._clear_boat_flow_field(boat)
+        return True
+
+    def _assign_exit(self, boat: Boat) -> bool:
+        if boat.position is None:
+            return False
+
+        self._release_deposit_target(boat)
+        exit_directions = {}
+        for position in self.entry_exit_cells:
+            for direction in (
+                DIRECTION_NORTH,
+                DIRECTION_EAST,
+                DIRECTION_SOUTH,
+                DIRECTION_WEST,
+            ):
+                if self._boat_fits_at(boat, position, direction):
+                    exit_directions[position] = direction
+                    break
+
+        boat.objective = "exit"
+        boat.exit_directions = exit_directions
+        exit_targets = list(exit_directions) or self.entry_exit_cells
+        nearest_exit = min(
+            exit_targets,
+            key=lambda position: math.dist(boat.position, position),
+        )
+        self._set_boat_target(boat, nearest_exit, targets=exit_targets)
+        return True
+
+    def _update_objective(self, boat: Boat) -> None:
+        """Apply the policy: deposit fish, refuel, then leave the map."""
+        if boat.fish > 0:
+            if (
+                boat.objective == "deposit"
+                and boat.navigation_target is not None
+            ):
+                return
+            if boat.assignment_cooldown > 0:
+                boat.assignment_cooldown -= 1
+                return
+            if not self._assign_deposit(boat):
+                # No free berth right now: hold and retry later.
+                boat.objective = None
+                boat.navigation_target = None
+                boat.navigation_path = []
+                self._clear_boat_flow_field(boat)
+                boat.assignment_cooldown = 3
+            return
+        if boat.objective == "exit":
+            # Once a boat commits to leaving it does not turn back for fuel.
+            return
+        if boat.fuel_ratio < self.fuel_threshold and self.fuel_access_positions:
+            if boat.objective != "fuel":
+                self._assign_fuel(boat)
+            return
+        self._assign_exit(boat)
+
+    def _clear_boat_flow_field(self, boat: Boat) -> None:
+        if boat.flow_field_key is not None:
+            self.flow_fields.pop(boat.flow_field_key, None)
+        boat.flow_field_key = None
 
     def _boat_fits_at(
-        self, boat: Boat, position: tuple[int, int], direction: int
+        self,
+        boat: Boat,
+        position: tuple[int, int],
+        direction: int,
+        *,
+        occupied: set[tuple[int, int]] | None = None,
     ) -> bool:
         previous_direction = boat.direction
         boat.direction = direction
         fits = self.can_place_boat(boat, position)
+        if fits and occupied:
+            fits = not occupied.intersection(
+                boat.occupied_cells(position)
+            )
         boat.direction = previous_direction
         return fits
 
-    def _finish_deposit(self, boat: Boat) -> None:
-        station = boat.deposit_station
-        if station is not None:
-            was_active = station.active_boat is boat
-            if boat in station.queue:
-                station.queue.remove(boat)
-            if was_active:
-                station.release(boat)
-            boat.deposit_station = None
-            if station.queue:
-                station.occupy(station.queue[0])
-                station.queue[0].deposit_status = "approaching"
-
-        boat.deposit_status = "exiting"
-        if boat.position is not None:
-            exit_directions = {}
-            for position in self.entry_exit_cells:
-                for direction in (
-                    DIRECTION_NORTH,
-                    DIRECTION_EAST,
-                    DIRECTION_SOUTH,
-                    DIRECTION_WEST,
-                ):
-                    if self._boat_fits_at(boat, position, direction):
-                        exit_directions[position] = direction
-                        break
-            boat.exit_directions = exit_directions
-            exit_targets = list(exit_directions) or self.entry_exit_cells
-            nearest_exit = min(
-                exit_targets,
-                key=lambda position: math.dist(boat.position, position),
-            )
-            self._set_boat_target(
-                boat,
-                nearest_exit,
-                targets=exit_targets,
-            )
-
     def _remove_boat(self, boat: Boat) -> None:
+        self._release_deposit_target(boat)
         self.grid.remove_agent(boat)
         boat.remove()
         if boat in self.boats:
             self.boats.remove(boat)
-        if boat.flow_field_key is not None:
-            self.flow_fields.pop(boat.flow_field_key, None)
+        self._clear_boat_flow_field(boat)
 
-    def update_deposit_flow_field(self) -> None:
-        """Rebuild the flow field toward the available deposit access cells."""
-        targets = self.get_available_deposit_positions()
-        if targets:
-            self.flow_fields["deposit"] = generate_flow_field(
+    def _rebuild_flow_field(
+        self, key: str, targets: tuple[tuple[int, int], ...]
+    ) -> None:
+        self.flow_fields[key] = (
+            generate_flow_field(
                 self.grid,
-                targets=targets,
+                targets=list(targets),
                 is_walkable_func=self.is_cell_walkable,
             )
-        else:
-            self.flow_fields["deposit"] = {}
+            if targets
+            else {}
+        )
 
     def _find_spawn_placement(self, boat: Boat) -> tuple[int, int] | None:
         """Return a free entry cell where the boat footprint fits."""
@@ -692,6 +757,13 @@ class World(Model):
         boat.direction = direction
         return position
 
+    def _random_initial_fuel(self) -> float:
+        """Fuel left from a boat's trip into the map."""
+        ratio = self.random.uniform(
+            self.initial_fuel_min_ratio, self.initial_fuel_max_ratio
+        )
+        return DEFAULT_FUEL_CAPACITY * ratio
+
     def spawn_boats(self) -> list[Boat]:
         """Spawn scheduled arrivals, retaining boats while the entrance is busy."""
         self._pending_boat_sizes.extend(
@@ -716,7 +788,7 @@ class World(Model):
                 name=f"Boat {self.boats_spawned + 1}",
                 speed=1,
                 capacity=max(fish, self.fish_amount, 1),
-                fuel_consumption=1,
+                initial_fuel=self._random_initial_fuel(),
                 fish=fish,
             )
 
@@ -731,42 +803,133 @@ class World(Model):
             break
         return spawned
 
+    @staticmethod
+    def _objective_priority(boat: Boat) -> int:
+        """Fuel-critical boats move first, then loaded, then departing."""
+        return {"fuel": 0, "deposit": 1, "exit": 2}.get(boat.objective, 3)
+
+    def _boats_in_priority_order(self) -> list[Boat]:
+        return sorted(
+            self.boats,
+            key=lambda boat: (self._objective_priority(boat), boat.name),
+        )
+
+    def _movement_goal(self, boat: Boat) -> tuple[int, int] | None:
+        """Approximate goal used to score sidestep moves."""
+        if boat.position is None:
+            return None
+        if boat.objective == "deposit":
+            if boat.navigation_target is not None:
+                return boat.navigation_target
+            candidates = self.deposit_access_positions
+        elif boat.objective == "fuel":
+            candidates = self.fuel_access_positions
+        elif boat.objective == "exit":
+            candidates = self.entry_exit_cells
+        else:
+            return None
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda cell: math.dist(boat.position, cell),
+        )
+
+    def _sidestep(self, boat: Boat) -> bool:
+        """Take any free cell to break a head-on or footprint deadlock."""
+        position = boat.position
+        if position is None:
+            return False
+
+        occupied = self._occupied_cells(exclude=boat)
+        goal = self._movement_goal(boat)
+        best: tuple[float, tuple[int, int], int] | None = None
+        for dx, dy in (
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (-1, 1),
+            (1, -1),
+            (1, 1),
+        ):
+            neighbor = (position[0] + dx, position[1] + dy)
+            direction = Boat._direction_from_delta(dx, dy)
+            if not self._boat_fits_at(
+                boat, neighbor, direction, occupied=occupied
+            ):
+                continue
+            score = 0.0
+            if goal is not None:
+                score = -math.dist(neighbor, goal)
+            if best is None or score > best[0]:
+                best = (score, neighbor, direction)
+
+        if best is None:
+            return False
+
+        _, neighbor, direction = best
+        if not self.move_boat(
+            boat,
+            neighbor[0] - position[0],
+            neighbor[1] - position[1],
+            direction=direction,
+        ):
+            return False
+
+        if boat.objective == "deposit":
+            # The old path no longer matches the new position. Release the
+            # berth so another boat can use it while this one re-plans.
+            self._release_deposit_target(boat)
+            boat.navigation_target = None
+            boat.navigation_path = []
+            return True
+
+    def _handle_move_status(self, boat: Boat, status: str) -> None:
+        """Wait one turn on a blockage, then re-plan, then step aside."""
+        if boat.sidestep_cooldown > 0:
+            boat.sidestep_cooldown -= 1
+
+        if status in (MOVE_MOVED, MOVE_ARRIVED):
+            boat.blocked_steps = 0
+            return
+        if status != MOVE_BLOCKED:
+            return
+
+        boat.blocked_steps += 1
+        if boat.objective == "deposit" and boat.blocked_steps in (2, 5):
+            self._assign_deposit(boat)
+        if boat.blocked_steps >= 8 and boat.sidestep_cooldown == 0:
+            if self._sidestep(boat):
+                boat.blocked_steps = 0
+                boat.sidestep_cooldown = 4
+
     def step(self):
-        """Spawn boats, then move and service them."""
+        """Update each boat's objective, then move and service it."""
         self.spawn_boats()
 
-        for boat in list(self.boats):
+        for boat in self._boats_in_priority_order():
             if boat.position is None:
                 continue
 
-            if boat.deposit_status == "exiting":
-                boat.step()
-                if boat.position in self.entry_exit_cells:
-                    self._remove_boat(boat)
-                continue
-
-            if boat.fish <= 0:
-                self._finish_deposit(boat)
-                continue
-
-            terrain = self.grid.properties["terrain"].data
-            x, y = boat.position
+            self._update_objective(boat)
             if (
-                boat.deposit_station is None
-                and terrain[x][y] != self.ENTRY_EXIT
+                boat.objective == "exit"
+                and boat.position in self.entry_exit_cells
             ):
-                self._assign_deposit_station(boat)
+                self._remove_boat(boat)
+                continue
 
-            boat.step()
-
-            if boat.deposit_station is None and boat.position is not None:
-                x, y = boat.position
-                if terrain[x][y] != self.ENTRY_EXIT:
-                    self._assign_deposit_station(boat)
-
+            status = boat.step()
+            self._handle_move_status(boat, status)
             self.service_boat(boat)
-            if boat.fish <= 0:
-                self._finish_deposit(boat)
+
+            if (
+                boat.objective == "exit"
+                and boat.position in self.entry_exit_cells
+            ):
+                self._remove_boat(boat)
 
         self._record_revenue()
         self.steps += 1
@@ -821,6 +984,13 @@ class World(Model):
         return (
             self.deposit_station_count
             * self.deposit_station_construction_cost
+        )
+
+    @property
+    def artificial_land_total_cost(self) -> float:
+        return (
+            self.artificial_land_count
+            * self.artificial_land_construction_cost
         )
 
     @property
@@ -887,19 +1057,18 @@ class World(Model):
         efficiency = max(0.2, 1.0 - agitation * 0.8)
 
         serviced = False
-        zones = self.zones_at_position(boat.position)
+        zones: set[str] = set()
+        for cell in boat.occupied_cells():
+            zones |= self.zones_at_position(cell)
 
-        station = boat.deposit_station
-        # Waiting boats also drive to a berth, so any boat that reached its
-        # assigned cell may unload. Refusing them would park them there and
-        # block the active boat forever.
-        is_at_assigned_station = (
-            station is not None
-            and boat.position == boat.navigation_target
-        )
-        if "deposit" in zones and boat.fish > 0 and is_at_assigned_station:
+        # Every deposit tile is an independent station, so a boat only needs
+        # to be next to any deposit zone to unload.
+        if "deposit" in zones and boat.fish > 0:
             if self.random.random() < efficiency:
-                unloaded = min(boat.fish, self.FISH_UNLOAD_PER_STEP)
+                unloaded = min(
+                    boat.fish,
+                    max(1, math.ceil(boat.capacity * self.fish_unload_factor)),
+                )
                 boat.fish -= unloaded
                 self.total_fish_deposited += unloaded
                 revenue = unloaded * self.fish_price
@@ -907,10 +1076,22 @@ class World(Model):
                 self.score += revenue
                 serviced = True
 
-        if "fuel" in zones and boat.fuel < self.fuel_threshold:
+        if boat.fish <= 0:
+            self._release_deposit_target(boat)
+
+        # Only boats whose current objective is refuelling stop for fuel;
+        # loaded boats must deposit first.
+        if (
+            boat.objective == "fuel"
+            and "fuel" in zones
+            and boat.fuel_ratio < self.fuel_threshold
+        ):
             if self.random.random() < efficiency:
-                refilled = boat.fuel_capacity - boat.fuel
-                boat.fuel = boat.fuel_capacity
+                refilled = min(
+                    boat.fuel_capacity - boat.fuel,
+                    boat.fuel_capacity * self.fuel_refill_factor,
+                )
+                boat.fuel += refilled
                 self.total_fuel_refilled += refilled
                 self.total_fuel_paid += refilled * self.fuel_price
                 self.score -= refilled * self.fuel_price

@@ -1,12 +1,8 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
 
 from mesa import Agent
-
-if TYPE_CHECKING:
-    from model.tiles.deposit_zone import DepositZone
 
 
 # Size -> (length along the bow, beam). Length is horizontal when facing east,
@@ -18,6 +14,7 @@ BOAT_FOOTPRINTS: dict[int, tuple[int, int]] = {
 }
 
 DEFAULT_BOAT_SIZE = 1
+DEFAULT_FUEL_CAPACITY = 100.0
 
 # 0 = north, 1 = east, 2 = south, 3 = west.
 DIRECTION_NORTH = 0
@@ -27,6 +24,12 @@ DIRECTION_WEST = 3
 
 VERTICAL_DIRECTIONS = (DIRECTION_NORTH, DIRECTION_SOUTH)
 
+# Result of a boat's movement attempt.
+MOVE_MOVED = "moved"
+MOVE_ARRIVED = "arrived"
+MOVE_BLOCKED = "blocked"
+MOVE_IDLE = "idle"
+
 
 class Boat(Agent):
     def __init__(
@@ -35,8 +38,7 @@ class Boat(Agent):
         name: str,
         speed: float,
         capacity: int,
-        fuel_consumption: float,
-        fuel_capacity: float = 100.0,
+        fuel_capacity: float = DEFAULT_FUEL_CAPACITY,
         initial_fuel: float | None = None,
         fish: int = 0,
         boat_type: str = "fisher",
@@ -54,7 +56,6 @@ class Boat(Agent):
         self.name: str = name
         self.speed: float = speed
         self.capacity: int = capacity
-        self.fuel_consumption: float = fuel_consumption
         self.fuel_capacity: float = fuel_capacity
         self.fuel: float = (
             fuel_capacity if initial_fuel is None else initial_fuel
@@ -67,13 +68,15 @@ class Boat(Agent):
 
         self.boat_type: str = boat_type
         self.direction: int = int(direction) % 4
-        self.deposit_station: DepositZone | None = None
-        self.deposit_status = "arriving"
+        self.objective: str | None = None
         self.navigation_target: tuple[int, int] | None = None
-        self.navigation_direction: int | None = None
         self.navigation_path: list[tuple[tuple[int, int], int]] = []
         self.exit_directions: dict[tuple[int, int], int] = {}
         self.flow_field_key: object | None = None
+        # Pathfinding feedback, driven by World after every movement attempt.
+        self.blocked_steps: int = 0
+        self.assignment_cooldown: int = 0
+        self.sidestep_cooldown: int = 0
 
     @property
     def size_key(self) -> int:
@@ -86,6 +89,11 @@ class Boat(Agent):
     @property
     def heading(self) -> int:
         return int(self.direction) % 4
+
+    @property
+    def fuel_ratio(self) -> float:
+        """Fuel level as a fraction of capacity, clamped to ``[0, 1]``."""
+        return max(0.0, min(1.0, self.fuel / self.fuel_capacity))
 
     @property
     def footprint(self) -> tuple[int, int]:
@@ -148,14 +156,11 @@ class Boat(Agent):
         self,
         target_dx: float,
         target_dy: float,
-        *,
-        stop_if_blocked: bool = False,
     ) -> tuple[int, int] | None:
         if self.pos is None or (target_dx == 0 and target_dy == 0):
             return self.pos
 
         best_pos = self.pos
-        best_direction = self.direction
         best_score = -float("inf")
         previous_direction = self.direction
 
@@ -172,19 +177,11 @@ class Boat(Agent):
 
             # Large boats need a valid footprint in the direction of travel.
             direction = self._direction_from_delta(dir_x, dir_y)
-            if (
-                stop_if_blocked
-                and (nx, ny) == self.navigation_target
-                and self.navigation_direction is not None
-            ):
-                direction = self.navigation_direction
             self.direction = direction
             can_place = self.model.can_place_boat(self, (nx, ny))
             if not can_place:
                 continue
-            if not stop_if_blocked and not self.model.can_boat_move_to(
-                self, (nx, ny)
-            ):
+            if not self.model.can_boat_move_to(self, (nx, ny)):
                 continue
 
             dot_product = ((dir_x / length) * target_dx) + (
@@ -193,116 +190,100 @@ class Boat(Agent):
             if dot_product > best_score:
                 best_score = dot_product
                 best_pos = (nx, ny)
-                best_direction = direction
 
         self.direction = previous_direction
-        if stop_if_blocked and best_pos != self.pos:
-            self.direction = best_direction
-            can_move = self.model.can_boat_move_to(self, best_pos)
-            self.direction = previous_direction
-            if not can_move:
-                return self.pos
         return best_pos
 
-    def move(self, target_key: str = "deposit") -> None:
-        can_limp_to_deposit = (
-            target_key == "deposit" and self.deposit_station is not None
-        )
-        if (
-            self.pos is None
-            or (
-                self.fuel <= 0
-                and target_key != "exit"
-                and not can_limp_to_deposit
-            )
-        ):
-            return
+    def _footprint_zones(self) -> set[str]:
+        zones: set[str] = set()
+        for cell in self.occupied_cells():
+            zones |= self.model.zones_at_position(cell)
+        return zones
 
-        current_terrain = self.model.grid.properties["terrain"].data[
-            self.pos[0]
-        ][self.pos[1]]
+    def _follow_path(self) -> str:
+        """Move one step along the boat's fixed navigation path."""
+        if not self.navigation_path:
+            return MOVE_BLOCKED
+
+        next_pos, direction = self.navigation_path[0]
+        previous_direction = self.direction
+        self.direction = direction
+        can_move = self.model.can_boat_move_to(self, next_pos)
+        self.direction = previous_direction
+        if not can_move:
+            return MOVE_BLOCKED
+
+        dx = next_pos[0] - self.pos[0]
+        dy = next_pos[1] - self.pos[1]
+        if not self.model.move_boat(self, dx, dy, direction=direction):
+            return MOVE_BLOCKED
+
+        self.navigation_path.pop(0)
+        return MOVE_MOVED
+
+    def move(self, target_key: str = "deposit") -> str:
+        """Attempt one movement step and report what happened."""
+        if self.pos is None:
+            return MOVE_IDLE
 
         if target_key == "deposit":
             if (
                 self.navigation_target is not None
                 and self.pos == self.navigation_target
             ):
-                return
+                return MOVE_ARRIVED
             if (
                 self.navigation_target is None
-                and current_terrain == self.model.DEPOSIT_ADJACENT
                 and self.fish > 0
+                and "deposit" in self._footprint_zones()
             ):
-                return
+                return MOVE_ARRIVED
             if self.navigation_target is not None:
-                if not self.navigation_path:
-                    return
+                return self._follow_path()
+            return MOVE_IDLE
 
-                next_pos, direction = self.navigation_path[0]
-                previous_direction = self.direction
-                self.direction = direction
-                can_move = self.model.can_boat_move_to(self, next_pos)
-                self.direction = previous_direction
-                if not can_move:
-                    return
-
-                dx = next_pos[0] - self.pos[0]
-                dy = next_pos[1] - self.pos[1]
-                if self.model.move_boat(self, dx, dy, direction=direction):
-                    self.navigation_path.pop(0)
-                    self.fuel = max(
-                        0.0, self.fuel - self.fuel_consumption
-                    )
-                return
-        elif target_key == "fuel":
+        if target_key == "fuel":
             if (
-                current_terrain == self.model.FUEL_ADJACENT
-                and self.fuel < self.fuel_capacity
+                self.fuel < self.fuel_capacity
+                and "fuel" in self._footprint_zones()
             ):
-                return
+                return MOVE_ARRIVED
+        elif target_key == "exit" and self.pos in self.exit_directions:
+            return MOVE_ARRIVED
 
+        # Fuel and exit follow a flow field toward every valid target cell.
         flow_fields = getattr(self.model, "flow_fields", {})
         field_key = (
             self.flow_field_key
-            if target_key in ("deposit", "exit")
-            and self.flow_field_key is not None
+            if target_key == "exit" and self.flow_field_key is not None
             else target_key
         )
         flow_field = flow_fields.get(field_key, {})
         ff_dx, ff_dy = flow_field.get(self.pos, (0.0, 0.0))
 
-        fixed_deposit_route = (
-            target_key == "deposit" and self.navigation_target is not None
-        )
-        if fixed_deposit_route:
-            avoid_dx, avoid_dy = 0.0, 0.0
-        else:
-            avoid_dx, avoid_dy = self._get_avoidance_vector(radius=2)
+        avoid_dx, avoid_dy = self._get_avoidance_vector(radius=2)
         combined_dx = ff_dx + (avoid_dx * 1.5)
         combined_dy = ff_dy + (avoid_dy * 1.5)
 
         next_pos = self._select_best_neighbor_cell(
             combined_dx,
             combined_dy,
-            stop_if_blocked=fixed_deposit_route,
         )
+        if not next_pos or next_pos == self.pos:
+            return MOVE_BLOCKED
 
-        if next_pos and next_pos != self.pos:
-            dx = next_pos[0] - self.pos[0]
-            dy = next_pos[1] - self.pos[1]
-            if target_key == "exit" and next_pos in self.exit_directions:
-                direction = self.exit_directions[next_pos]
-            elif (
-                target_key == "deposit"
-                and next_pos == self.navigation_target
-                and self.navigation_direction is not None
-            ):
-                direction = self.navigation_direction
-            else:
-                direction = self._direction_from_delta(dx, dy)
-            if self.model.move_boat(self, dx, dy, direction=direction):
-                self.fuel = max(0.0, self.fuel - self.fuel_consumption)
+        dx = next_pos[0] - self.pos[0]
+        dy = next_pos[1] - self.pos[1]
+        if target_key == "exit" and next_pos in self.exit_directions:
+            direction = self.exit_directions[next_pos]
+        else:
+            direction = self._direction_from_delta(dx, dy)
+        if not self.model.move_boat(self, dx, dy, direction=direction):
+            return MOVE_BLOCKED
+        return MOVE_MOVED
 
-    def step(self) -> None:
-        target_key = "exit" if self.deposit_status == "exiting" else "deposit"
-        self.move(target_key=target_key)
+    def step(self) -> str:
+        if self.objective is None:
+            return MOVE_IDLE
+        return self.move(target_key=self.objective)
+
