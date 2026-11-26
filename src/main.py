@@ -8,7 +8,6 @@ from mesa.visualization.solara_viz import ModelController, ShowSteps
 from mesa.visualization.utils import update_counter
 
 from model import map_io
-from model.entities.boat import DEFAULT_FUEL_CAPACITY, Boat
 from model.arrival_profiles import (
     DEFAULT_PORT_TYPE,
     PORT_TYPE_LABELS,
@@ -236,28 +235,8 @@ def prices_component(model):
 
 
 def build_model(scenario: Scenario) -> World:
-    """Create a world and place the pathfinding demo boat on free water."""
-    world = World(scenario, demo_boat_fish=None)
-    test_boat = Boat(
-        size=3,
-        name="Test Boat Pathfinding",
-        speed=1,
-        capacity=50,
-        initial_fuel=(
-            DEFAULT_FUEL_CAPACITY
-            * world.random.uniform(
-                world.initial_fuel_min_ratio, world.initial_fuel_max_ratio
-            )
-        ),
-        fish=30,
-    )
-    for y in range(1, world.grid.height):
-        for x in range(1, world.grid.width):
-            position = (x, y)
-            if world.can_place_boat(test_boat, position):
-                world.add_boat(test_boat, position)
-                return world
-    return world
+    """Create a world with no boats; arrivals come from the daily schedule."""
+    return World(scenario, demo_boat_fish=None)
 
 
 def make_scenario(

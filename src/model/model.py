@@ -89,7 +89,6 @@ class World(Model):
         self.initial_fuel_max_ratio = scenario.initial_fuel_max_ratio
         self.fish_unload_factor = scenario.fish_unload_factor
         self.fuel_refill_factor = scenario.fuel_refill_factor
-        self.ship_spawn_rate = scenario.ship_spawn_rate
         self.port_type = scenario.port_type
         self._arrival_schedule = build_daily_arrival_schedule(
             scenario.port_type,
